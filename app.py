@@ -11,6 +11,9 @@ import mimetypes
 from typing import Optional
 from datetime import datetime, UTC
 from enum import Enum
+from typing import cast
+from types import TracebackType
+
 
 import uvicorn
 from dotenv import load_dotenv
@@ -29,11 +32,27 @@ from pydantic import BaseModel
 
 # This import will work once browser-use is installed
 # For development, you may need to add the browser-use repo to your PYTHONPATH
+# from browser_use import Agent
+# from browser_use.agent.views import AgentHistoryList
+# from browser_use import BrowserConfig, Browser
+# from browser_use.browser.browser import Browser, BrowserConfig
+# from browser_use.browser.context import BrowserContext
+
+# from browser_use.llm import LLMProvider
+
 from browser_use import Agent
 from browser_use.agent.views import AgentHistoryList
 from browser_use import BrowserConfig, Browser
-from browser_use.browser.browser import Browser, BrowserConfig
 from browser_use.browser.context import BrowserContext
+
+from browser_use.llm import (
+    ChatAnthropic,
+    ChatOpenAI,
+    ChatGoogle,
+    ChatOllama,
+    ChatAzureOpenAI,
+    ChatAWSBedrock,
+)
 
 from pathlib import Path
 
@@ -157,32 +176,35 @@ def get_llm(ai_provider: str):
         return ChatAnthropic(
             model=os.environ.get("ANTHROPIC_MODEL_ID", "claude-3-opus-20240229")
         )
-    elif ai_provider == "mistral":
-        return ChatMistralAI(
-            model=os.environ.get("MISTRAL_MODEL_ID", "mistral-large-latest")
-        )
+    # elif ai_provider == "mistral":
+    #     return LLMProvider.MISTRAL(
+    #         model=os.environ.get("MISTRAL_MODEL_ID", "mistral-large-latest")
+    #     )
     elif ai_provider == "google":
-        return ChatGoogleGenerativeAI(
+        return ChatGoogle(
             model=os.environ.get("GOOGLE_MODEL_ID", "gemini-1.5-pro")
         )
     elif ai_provider == "ollama":
         return ChatOllama(model=os.environ.get("OLLAMA_MODEL_ID", "llama3"))
     elif ai_provider == "azure":
-        return AzureChatOpenAI(
+         return ChatAzureOpenAI(
+            model=os.environ.get("AZURE_MODEL_ID", "gpt-4o"),
             azure_deployment=os.environ.get("AZURE_DEPLOYMENT_NAME"),
-            openai_api_version=os.environ.get("AZURE_API_VERSION", "2023-05-15"),
+            api_version=os.environ.get("AZURE_API_VERSION", "2023-05-15"),
             azure_endpoint=os.environ.get("AZURE_ENDPOINT"),
         )
     elif ai_provider == "bedrock":
-        return ChatBedrock(
-            model_id=os.environ.get("BEDROCK_MODEL_ID", "anthropic.claude-3-sonnet-20240229-v1:0")
+        return ChatAWSBedrock(
+            model=os.environ.get("BEDROCK_MODEL_ID", "anthropic.claude-3-sonnet-20240229-v1:0")
         )
     else:  # default to OpenAI
         base_url = os.environ.get("OPENAI_BASE_URL")
-        kwargs = {"model": os.environ.get("OPENAI_MODEL_ID", "gpt-4o")}
+        model = os.environ.get("OPENAI_MODEL_ID", "gpt-4o")
+        
         if base_url:
-            kwargs["base_url"] = base_url
-        return ChatOpenAI(**kwargs)
+            return ChatOpenAI(model=model, base_url=base_url)
+        else:
+            return ChatOpenAI(model=model)
 
 
 async def execute_task(task_id: str, instruction: str, ai_provider: str, user_id: str = DEFAULT_USER_ID):
@@ -215,6 +237,9 @@ async def execute_task(task_id: str, instruction: str, ai_provider: str, user_id
             headful = task_headful
         else:
             headful = os.environ.get("BROWSER_USE_HEADFUL", "false").lower() == "true"
+            browser_config_args = {
+                "headless": not headful,
+            }
 
         # Get Chrome path and user data directory (task settings override env vars)
         use_custom_chrome = task_browser_config.get("use_custom_chrome")
@@ -246,6 +271,7 @@ async def execute_task(task_id: str, instruction: str, ai_provider: str, user_id
             # Configure browser
             browser_config_args = {
                 "headless": not headful,
+                "chrome_instance_path": None,
             }
             # For older Chrome versions
             extra_chromium_args += ["--headless=new"]
@@ -253,7 +279,7 @@ async def execute_task(task_id: str, instruction: str, ai_provider: str, user_id
                 f"Task {task_id}: Browser config args: {browser_config_args.get('headless')}"
             )
             # Add Chrome executable path if provided
-            if chrome_path:
+            if chrome_path and chrome_path.lower() != "false":
                 browser_config_args["chrome_instance_path"] = chrome_path
                 logger.info(
                     f"Task {task_id}: Using custom Chrome executable: {chrome_path}"
@@ -267,10 +293,16 @@ async def execute_task(task_id: str, instruction: str, ai_provider: str, user_id
                 )
 
             browser_config = BrowserConfig(**browser_config_args)
-            browser = Browser(config=browser_config)
+            browser = Browser(browser_profile=browser_config)
+
+            # Create and assign browser context
+            browser_context = BrowserContext(browser=browser.browser)
+            await browser_context.__aenter__()  # Manually enter async context
 
             # Add browser to agent kwargs
             agent_kwargs["browser"] = browser
+            agent_kwargs["browser_context"] = browser_context
+
 
         logger.info(f"Agent kwargs: {agent_kwargs}")
         # Pass the browser to Agent
@@ -281,7 +313,9 @@ async def execute_task(task_id: str, instruction: str, ai_provider: str, user_id
 
         # Run agent
         result = await agent.run(
-            on_step_end=lambda agent_instance: automated_screenshot(agent_instance, task_id, user_id)
+            on_step_end=lambda agent_instance: asyncio.create_task(
+                automated_screenshot(agent_instance, task_id, user_id)
+            )
         )
 
         # Update finished timestamp and task status
@@ -290,47 +324,38 @@ async def execute_task(task_id: str, instruction: str, ai_provider: str, user_id
         # Extract result
         if isinstance(result, AgentHistoryList):
             final_result = result.final_result()
-            task_storage.set_task_output(task_id, final_result, user_id)
+            task_storage.set_task_output(task_id, final_result or "", user_id)
         else:
             task_storage.set_task_output(task_id, str(result), user_id)
 
         # Collect browser data if requested
         task = task_storage.get_task(task_id, user_id)
-        if task and task.get("save_browser_data") and hasattr(agent, "browser"):
+        if task and task.get("save_browser_data") and hasattr(agent, "browser_context"):
             try:
-                # Try multiple approaches to collect browser data
-                if hasattr(agent.browser, "get_cookies"):
-                    # Direct method if available
-                    cookies = await agent.browser.get_cookies()
-                    task_storage.update_task(task_id, {"browser_data": {"cookies": cookies}}, user_id)
-                elif hasattr(agent.browser, "page") and hasattr(
-                    agent.browser.page, "cookies"
-                ):
-                    # Try Playwright's page.cookies() method
-                    cookies = await agent.browser.page.cookies()
-                    task_storage.update_task(task_id, {"browser_data": {"cookies": cookies}}, user_id)
-                elif hasattr(agent.browser, "context") and hasattr(
-                    agent.browser.context, "cookies"
-                ):
-                    # Try Playwright's context.cookies() method
-                    cookies = await agent.browser.context.cookies()
-                    task_storage.update_task(task_id, {"browser_data": {"cookies": cookies}}, user_id)
+                cookies = []
+                browser_context = None
+                try:
+                    browser_context = agent.browser_context
+                except AssertionError:
+                    logger.warning(f"BrowserContext is not set up for task {task_id}, skipping cookie collection.")
+
+                if browser_context:
+                    if hasattr(browser_context, "get_cookies"):
+                        cookies = await browser_context.cookies()
+                    else:
+                        logger.warning(f"No known method to collect cookies for task {task_id}")
                 else:
-                    logger.warning(
-                        f"No known method to collect cookies for task {task_id}"
-                    )
-                    task_storage.update_task(
-                        task_id, 
-                        {"browser_data": {
-                            "cookies": [],
-                            "error": "No method available to collect cookies"
-                        }},
-                        user_id
-                    )
+                    logger.warning(f"No browser_context available for task {task_id}")
+
+                task_storage.update_task(
+                    task_id,
+                    {"browser_data": {"cookies": cookies}},
+                    user_id
+                )
             except Exception as e:
                 logger.error(f"Failed to collect browser data: {str(e)}")
                 task_storage.update_task(
-                    task_id, 
+                    task_id,
                     {"browser_data": {"cookies": [], "error": str(e)}},
                     user_id
                 )
@@ -341,6 +366,15 @@ async def execute_task(task_id: str, instruction: str, ai_provider: str, user_id
         task_storage.set_task_error(task_id, str(e), user_id)
         task_storage.mark_task_finished(task_id, user_id, TaskStatus.FAILED)
     finally:
+        if browser_context:
+            try:
+                await browser_context.__aexit__(
+                    cast(type[BaseException], None),
+                    cast(BaseException, None),
+                    cast(TracebackType, None)
+                )
+            except Exception as e:
+                logger.warning(f"Error closing browser context: {str(e)}")
         # Always close the browser, regardless of success or failure
         if browser is not None:
             logger.info(f"Closing browser for task {task_id}")
@@ -394,9 +428,8 @@ async def execute_task(task_id: str, instruction: str, ai_provider: str, user_id
             except Exception as e:
                 logger.error(f"Error taking final screenshot: {str(e)}")
                 await browser.close()
-                logger.info(f"Browser closed successfully for task {task_id}")
-            except Exception as e:
                 logger.error(f"Error closing browser for task {task_id}: {str(e)}")
+                
 
 
 # API Routes
@@ -435,25 +468,48 @@ async def run_task(request: TaskRequest, user_id: str = Depends(get_user_id)):
     task_storage.create_task(task_id, task_data, user_id)
 
     # Start task in background
-    asyncio.create_task(execute_task(task_id, request.task, request.ai_provider, user_id))
+    ai_provider = request.ai_provider or "openai"
+    asyncio.create_task(execute_task(task_id, request.task, ai_provider, user_id))
 
     return TaskResponse(id=task_id, status=TaskStatus.CREATED, live_url=live_url)
 
 
 async def automated_screenshot(agent, task_id, user_id=DEFAULT_USER_ID):
-    current_page = await agent.browser_context.get_current_page()
-    
-    visit_log = agent.state.history.urls()
-    current_url = current_page.url
-    previous_url = visit_log[-2] if len(visit_log) >= 2 else None
-    logger.info(f"Agent was last on URL: {previous_url} and is now on {current_url}")
-    await capture_screenshot(agent, task_id, user_id)
+    # Only proceed if browser_context is set up
+    if not hasattr(agent, "browser_context") or agent.browser_context is None:
+        logger.warning(f"Agent browser_context not set up for task {task_id}, skipping screenshot.")
+        return
+
+    try:
+        # (Optional) Log current and previous URLs for debugging
+        current_url = "unknown"
+        previous_url = None
+        try:
+            if hasattr(agent, "state") and hasattr(agent.state, "history"):
+                history = agent.state.history
+                visit_log = history.urls() if hasattr(history, "urls") else []
+                if visit_log:
+                    current_url = visit_log[-1]
+                if len(visit_log) >= 2:
+                    previous_url = visit_log[-2]
+        except Exception as e:
+            logger.warning(f"Couldn't get visit log from agent history: {str(e)}")
+
+        logger.info(f"Agent was last on URL: {previous_url} and is now on {current_url}")
+
+        # Call the screenshot function (which will use browser_context)
+        await capture_screenshot(agent, task_id, user_id)
+    except Exception as e:
+        logger.error(f"Error in automated_screenshot for task {task_id}: {str(e)}")
 
 
 @app.get("/api/v1/task/{task_id}/status", response_model=TaskStatusResponse)
 async def get_task_status(task_id: str, user_id: str = Depends(get_user_id)):
     """Get status of a task"""
     task = task_storage.get_task(task_id, user_id)
+
+    agent = task_storage.get_task_agent(task_id, user_id)
+
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
@@ -473,7 +529,12 @@ async def get_task_status(task_id: str, user_id: str = Depends(get_user_id)):
         task_storage.add_task_step(task_id, step_info, user_id)
         logger.info(f"Added step {current_step} for task {task_id}")
 
-    await capture_screenshot(task_storage.get_task_agent(task_id, user_id), task_id, user_id)
+    try:
+        _ = agent.browser_context
+        await capture_screenshot(agent, task_id, user_id)
+        # await capture_screenshot(task_storage.get_task_agent(task_id, user_id), task_id, user_id)
+    except AssertionError:
+        logger.info(f"BrowserContext not ready for task {task_id}, skipping screenshot.")
 
     return TaskStatusResponse(
         status=task["status"],
@@ -482,103 +543,75 @@ async def get_task_status(task_id: str, user_id: str = Depends(get_user_id)):
     )
 
 
-async def capture_screenshot(agent, task_id, user_id=DEFAULT_USER_ID):
-    """Capture screenshot from the agent's browser context"""
+async def capture_screenshot(agent_or_context, task_id, user_id=DEFAULT_USER_ID):
     logger.info(f"Capturing screenshot for task: {task_id}")
 
-    # Check if agent exists
-    if agent is None:
-        logger.warning(f"No agent available for task {task_id}")
+    # Accept either Agent or BrowserContext
+    if hasattr(agent_or_context, "browser_context"):
+        browser_context = getattr(agent_or_context, "browser_context", None)
+    else:
+        browser_context = agent_or_context
+
+    if browser_context is None:
+        logger.warning(f"No browser_context available for task {task_id}")
         return
 
-    # Log agent type for debugging
-    logger.info(f"Agent type: {type(agent).__name__}")
+    # Defensive: check for take_screenshot method
+    if not hasattr(browser_context, "take_screenshot"):
+        logger.error(f"browser_context does not have take_screenshot for task {task_id}")
+        return
 
-    # Check if agent has browser_context
-    if hasattr(agent, "browser_context") and agent.browser_context:
+    try:
+        screenshot_b64 = await browser_context.take_screenshot(full_page=True)
+
+        if not screenshot_b64:
+            logger.warning("Screenshot unavailable")
+            return
+
+        # Save screenshot with appropriate file handling
+        task_media_dir = MEDIA_DIR / task_id
+        task_media_dir.mkdir(exist_ok=True, parents=True)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        task = task_storage.get_task(task_id, user_id)
+        if task and "steps" in task and task["steps"]:
+            current_step = task["steps"][-1]["step"] - 1
+        else:
+            current_step = "initial"
+
+        if task and task["status"] == TaskStatus.FINISHED:
+            screenshot_filename = f"final-{timestamp}.png"
+        elif task and task["status"] == TaskStatus.RUNNING:
+            screenshot_filename = f"status-step-{current_step}-{timestamp}.png"
+        else:
+            task_status = task["status"] if task else "unknown"
+            screenshot_filename = f"status-{task_status}-{timestamp}.png"
+
+        screenshot_path = task_media_dir / screenshot_filename
+
         try:
-            logger.info(f"Taking screenshot for task: {task_id}")
+            image_data = base64.b64decode(screenshot_b64)
+            with open(screenshot_path, "wb") as f:
+                f.write(image_data)
 
-            # Get current URL for logging
-            current_url = "unknown"
-            try:
-                page = await agent.browser_context.get_current_page()
-                current_url = page.url if page else "unknown"
-            except Exception as e:
-                logger.warning(f"Couldn't get current URL: {str(e)}")
-
-            logger.info(f"Agent's current URL before screenshot: {current_url}")
-
-            # Skip capturing about:blank pages
-            if current_url == "about:blank":
-                logger.info("Skipping screenshot - blank page detected")
-                return
-
-            # Take screenshot using agent's browser context
-            screenshot_b64 = await agent.browser_context.take_screenshot(full_page=True)
-            logger.info(
-                f"Screenshot taken, base64 length: {len(screenshot_b64) if screenshot_b64 else 0}"
-            )
-
-            if screenshot_b64:
-                # Save screenshot with appropriate file handling
-                task_media_dir = MEDIA_DIR / task_id
-                task_media_dir.mkdir(exist_ok=True, parents=True)
-
-                # Generate a timestamp-based unique name
-                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-
-                # Get current step number more reliably
-                task = task_storage.get_task(task_id, user_id)
-                if task and "steps" in task and task["steps"]:
-                    # Use the latest step number
-                    current_step = (
-                        task["steps"][-1]["step"] - 1
-                    )  # First page always blank
-                else:
-                    current_step = "initial"
-
-                # Generate filename based on when the screenshot was taken
-                if task and task["status"] == TaskStatus.FINISHED:
-                    screenshot_filename = f"final-{timestamp}.png"
-                elif task and task["status"] == TaskStatus.RUNNING:
-                    screenshot_filename = f"status-step-{current_step}-{timestamp}.png"
-                else:
-                    task_status = task["status"] if task else "unknown"
-                    screenshot_filename = f"status-{task_status}-{timestamp}.png"
-
-                screenshot_path = task_media_dir / screenshot_filename
-
-                try:
-                    image_data = base64.b64decode(screenshot_b64)
-                    with open(screenshot_path, "wb") as f:
-                        f.write(image_data)
-
-                    if screenshot_path.exists() and screenshot_path.stat().st_size > 0:
-                        logger.info(
-                            f"Screenshot saved: {screenshot_path} ({screenshot_path.stat().st_size} bytes)"
-                        )
-
-                        screenshot_url = f"/media/{task_id}/{screenshot_filename}"
-                        media_entry = {
-                            "url": screenshot_url,
-                            "type": "screenshot",
-                            "filename": screenshot_filename,
-                            "created_at": datetime.now(UTC).isoformat() + "Z",
-                        }
-                        task_storage.add_task_media(task_id, media_entry, user_id)
-                    else:
-                        logger.error(
-                            f"Screenshot file not created or empty: {screenshot_path}"
-                        )
-                except Exception as e:
-                    logger.error(f"Error saving screenshot: {str(e)}")
+            if screenshot_path.exists() and screenshot_path.stat().st_size > 0:
+                logger.info(
+                    f"Screenshot saved: {screenshot_path} ({screenshot_path.stat().st_size} bytes)"
+                )
+                screenshot_url = f"/media/{task_id}/{screenshot_filename}"
+                media_entry = {
+                    "url": screenshot_url,
+                    "type": "screenshot",
+                    "filename": screenshot_filename,
+                    "created_at": datetime.now(UTC).isoformat() + "Z",
+                }
+                task_storage.add_task_media(task_id, media_entry, user_id)
             else:
-                logger.warning(f"Screenshot unavailable")
+                logger.error(f"Screenshot file not created or empty: {screenshot_path}")
         except Exception as e:
-            logger.error(f"Error taking screenshot: {str(e)}")
-    else:
-        logger.warning(f"Agent has no browser_context for task {task_id}")
+            logger.error(f"Error saving screenshot: {str(e)}")
+
+    except Exception as e:
+        logger.error(f"Error taking screenshot: {str(e)}")
 
 
 @app.get("/api/v1/task/{task_id}", response_model=dict)
@@ -901,7 +934,10 @@ async def get_task_media(task_id: str, user_id: str = Depends(get_user_id), type
 
     # Get updated task with media
     task = task_storage.get_task(task_id, user_id)
-    media_list = task.get("media", [])
+    if task is not None:
+        media_list = task.get("media", [])
+    else:
+        media_list = []
 
     # Filter by type if specified
     if type and isinstance(media_list, list):
@@ -1021,7 +1057,10 @@ async def test_screenshot(ai_provider: str = "google"):
     try:
         # Configure browser
         headful = os.environ.get("BROWSER_USE_HEADFUL", "false").lower() == "true"
-        browser_config_args = {"headless": not headful}
+        browser_config_args = {
+            "headless": not headful, 
+            "chrome_instance_path": None,
+        }
 
         # Add Chrome executable path if provided
         chrome_path = os.environ.get("CHROME_PATH")
@@ -1030,10 +1069,10 @@ async def test_screenshot(ai_provider: str = "google"):
 
         logger.info(f"Creating browser with config: {browser_config_args}")
         browser_config = BrowserConfig(**browser_config_args)
-        browser_service = Browser(config=browser_config)
+        browser_service = Browser(browser_profile=browser_config)
 
         # Create a BrowserContext instance which has the take_screenshot method
-        browser_context = BrowserContext(browser=browser_service)
+        browser_context = BrowserContext(browser=browser_service.browser)
 
         # Start the context and navigate to example.com
         async with browser_context:
