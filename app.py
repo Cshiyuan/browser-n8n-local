@@ -143,7 +143,9 @@ task_storage = get_task_storage()
 # Models
 class TaskRequest(BaseModel):
     task: str
-    ai_provider: Optional[str] = os.environ.get("DEFAULT_AI_PROVIDER", "openai")  # Default to OpenAI or env var
+    ai_provider: Optional[str] = os.environ.get(
+        "DEFAULT_AI_PROVIDER", "openai"
+    )  # Default to OpenAI or env var
     save_browser_data: Optional[bool] = False  # Whether to save browser cookies
     headful: Optional[bool] = None  # Override BROWSER_USE_HEADFUL setting
     use_custom_chrome: Optional[bool] = (
@@ -181,13 +183,11 @@ def get_llm(ai_provider: str):
     #         model=os.environ.get("MISTRAL_MODEL_ID", "mistral-large-latest")
     #     )
     elif ai_provider == "google":
-        return ChatGoogle(
-            model=os.environ.get("GOOGLE_MODEL_ID", "gemini-1.5-pro")
-        )
+        return ChatGoogle(model=os.environ.get("GOOGLE_MODEL_ID", "gemini-1.5-pro"))
     elif ai_provider == "ollama":
         return ChatOllama(model=os.environ.get("OLLAMA_MODEL_ID", "llama3"))
     elif ai_provider == "azure":
-         return ChatAzureOpenAI(
+        return ChatAzureOpenAI(
             model=os.environ.get("AZURE_MODEL_ID", "gpt-4o"),
             azure_deployment=os.environ.get("AZURE_DEPLOYMENT_NAME"),
             api_version=os.environ.get("AZURE_API_VERSION", "2023-05-15"),
@@ -195,19 +195,23 @@ def get_llm(ai_provider: str):
         )
     elif ai_provider == "bedrock":
         return ChatAWSBedrock(
-            model=os.environ.get("BEDROCK_MODEL_ID", "anthropic.claude-3-sonnet-20240229-v1:0")
+            model=os.environ.get(
+                "BEDROCK_MODEL_ID", "anthropic.claude-3-sonnet-20240229-v1:0"
+            )
         )
     else:  # default to OpenAI
         base_url = os.environ.get("OPENAI_BASE_URL")
         model = os.environ.get("OPENAI_MODEL_ID", "gpt-4o")
-        
+
         if base_url:
             return ChatOpenAI(model=model, base_url=base_url)
         else:
             return ChatOpenAI(model=model)
 
 
-async def execute_task(task_id: str, instruction: str, ai_provider: str, user_id: str = DEFAULT_USER_ID):
+async def execute_task(
+    task_id: str, instruction: str, ai_provider: str, user_id: str = DEFAULT_USER_ID
+):
     """Execute browser task in background
 
     Chrome paths (CHROME_PATH and CHROME_USER_DATA) are only sourced from
@@ -295,14 +299,8 @@ async def execute_task(task_id: str, instruction: str, ai_provider: str, user_id
             browser_config = BrowserConfig(**browser_config_args)
             browser = Browser(browser_profile=browser_config)
 
-            # Create and assign browser context
-            browser_context = BrowserContext(browser=browser.browser)
-            await browser_context.__aenter__()  # Manually enter async context
-
-            # Add browser to agent kwargs
+            # Add browser to agent kwargs - let Agent manage its own browser session
             agent_kwargs["browser"] = browser
-            agent_kwargs["browser_context"] = browser_context
-
 
         logger.info(f"Agent kwargs: {agent_kwargs}")
         # Pass the browser to Agent
@@ -330,34 +328,34 @@ async def execute_task(task_id: str, instruction: str, ai_provider: str, user_id
 
         # Collect browser data if requested
         task = task_storage.get_task(task_id, user_id)
-        if task and task.get("save_browser_data") and hasattr(agent, "browser_context"):
+        if task and task.get("save_browser_data") and hasattr(agent, "browser_session"):
             try:
                 cookies = []
-                browser_context = None
+                browser_session = None
                 try:
-                    browser_context = agent.browser_context
-                except AssertionError:
-                    logger.warning(f"BrowserContext is not set up for task {task_id}, skipping cookie collection.")
+                    browser_session = agent.browser_session
+                except (AssertionError, AttributeError):
+                    logger.warning(
+                        f"BrowserSession is not set up for task {task_id}, skipping cookie collection."
+                    )
 
-                if browser_context:
-                    if hasattr(browser_context, "get_cookies"):
-                        cookies = await browser_context.cookies()
+                if browser_session:
+                    if hasattr(browser_session, "get_cookies"):
+                        cookies = await browser_session.get_cookies()
                     else:
-                        logger.warning(f"No known method to collect cookies for task {task_id}")
+                        logger.warning(
+                            f"No known method to collect cookies for task {task_id}"
+                        )
                 else:
-                    logger.warning(f"No browser_context available for task {task_id}")
+                    logger.warning(f"No browser_session available for task {task_id}")
 
                 task_storage.update_task(
-                    task_id,
-                    {"browser_data": {"cookies": cookies}},
-                    user_id
+                    task_id, {"browser_data": {"cookies": cookies}}, user_id
                 )
             except Exception as e:
                 logger.error(f"Failed to collect browser data: {str(e)}")
                 task_storage.update_task(
-                    task_id,
-                    {"browser_data": {"cookies": [], "error": str(e)}},
-                    user_id
+                    task_id, {"browser_data": {"cookies": [], "error": str(e)}}, user_id
                 )
 
     except Exception as e:
@@ -366,15 +364,6 @@ async def execute_task(task_id: str, instruction: str, ai_provider: str, user_id
         task_storage.set_task_error(task_id, str(e), user_id)
         task_storage.mark_task_finished(task_id, user_id, TaskStatus.FAILED)
     finally:
-        if browser_context:
-            try:
-                await browser_context.__aexit__(
-                    cast(type[BaseException], None),
-                    cast(BaseException, None),
-                    cast(TracebackType, None)
-                )
-            except Exception as e:
-                logger.warning(f"Error closing browser context: {str(e)}")
         # Always close the browser, regardless of success or failure
         if browser is not None:
             logger.info(f"Closing browser for task {task_id}")
@@ -385,51 +374,19 @@ async def execute_task(task_id: str, instruction: str, ai_provider: str, user_id
 
                 # Get agent to take screenshot
                 agent = task_storage.get_task_agent(task_id, user_id)
-                if agent and hasattr(agent, "browser_context"):
-                    # Take screenshot using agent's browser context
-                    result = await agent.run()
-                    screenshot_b64 = result.history[-1].state.screenshot
-
-                    if screenshot_b64:
-                        # Create task media directory if it doesn't exist
-                        task_media_dir = MEDIA_DIR / task_id
-                        task_media_dir.mkdir(exist_ok=True, parents=True)
-
-                        # Save screenshot
-                        screenshot_filename = "final_result.png"
-                        screenshot_path = task_media_dir / screenshot_filename
-
-                        # Decode base64 and save as file
-                        try:
-                            image_data = base64.b64decode(screenshot_b64)
-                            with open(screenshot_path, "wb") as f:
-                                f.write(image_data)
-
-                            # Verify file was created and has content
-                            if (
-                                screenshot_path.exists()
-                                and screenshot_path.stat().st_size > 0
-                            ):
-                                logger.info(
-                                    f"Final screenshot saved: {screenshot_path} ({screenshot_path.stat().st_size} bytes)"
-                                )
-
-                                # Add to media list with type
-                                screenshot_url = f"/media/{task_id}/{screenshot_filename}"
-                                media_entry = {
-                                    "url": screenshot_url,
-                                    "type": "screenshot",
-                                    "filename": screenshot_filename,
-                                    "created_at": datetime.now(UTC).isoformat() + "Z",
-                                }
-                                task_storage.add_task_media(task_id, media_entry, user_id)
-                        except Exception as e:
-                            logger.error(f"Error saving final screenshot: {str(e)}")
+                if agent and hasattr(agent, "browser_session"):
+                    # Take final screenshot using our capture_screenshot function
+                    await capture_screenshot(agent, task_id, user_id)
             except Exception as e:
                 logger.error(f"Error taking final screenshot: {str(e)}")
-                await browser.close()
-                logger.error(f"Error closing browser for task {task_id}: {str(e)}")
-                
+            finally:
+                if browser:
+                    try:
+                        await browser.close()
+                    except Exception as e:
+                        logger.error(
+                            f"Error closing browser for task {task_id}: {str(e)}"
+                        )
 
 
 # API Routes
@@ -475,9 +432,11 @@ async def run_task(request: TaskRequest, user_id: str = Depends(get_user_id)):
 
 
 async def automated_screenshot(agent, task_id, user_id=DEFAULT_USER_ID):
-    # Only proceed if browser_context is set up
-    if not hasattr(agent, "browser_context") or agent.browser_context is None:
-        logger.warning(f"Agent browser_context not set up for task {task_id}, skipping screenshot.")
+    # Only proceed if browser_session is set up
+    if not hasattr(agent, "browser_session") or agent.browser_session is None:
+        logger.warning(
+            f"Agent browser_session not set up for task {task_id}, skipping screenshot."
+        )
         return
 
     try:
@@ -495,9 +454,11 @@ async def automated_screenshot(agent, task_id, user_id=DEFAULT_USER_ID):
         except Exception as e:
             logger.warning(f"Couldn't get visit log from agent history: {str(e)}")
 
-        logger.info(f"Agent was last on URL: {previous_url} and is now on {current_url}")
+        logger.info(
+            f"Agent was last on URL: {previous_url} and is now on {current_url}"
+        )
 
-        # Call the screenshot function (which will use browser_context)
+        # Call the screenshot function (which will use browser_session)
         await capture_screenshot(agent, task_id, user_id)
     except Exception as e:
         logger.error(f"Error in automated_screenshot for task {task_id}: {str(e)}")
@@ -530,11 +491,13 @@ async def get_task_status(task_id: str, user_id: str = Depends(get_user_id)):
         logger.info(f"Added step {current_step} for task {task_id}")
 
     try:
-        _ = agent.browser_context
+        _ = agent.browser_session
         await capture_screenshot(agent, task_id, user_id)
         # await capture_screenshot(task_storage.get_task_agent(task_id, user_id), task_id, user_id)
-    except AssertionError:
-        logger.info(f"BrowserContext not ready for task {task_id}, skipping screenshot.")
+    except (AssertionError, AttributeError):
+        logger.info(
+            f"BrowserSession not ready for task {task_id}, skipping screenshot."
+        )
 
     return TaskStatusResponse(
         status=task["status"],
@@ -546,23 +509,32 @@ async def get_task_status(task_id: str, user_id: str = Depends(get_user_id)):
 async def capture_screenshot(agent_or_context, task_id, user_id=DEFAULT_USER_ID):
     logger.info(f"Capturing screenshot for task: {task_id}")
 
-    # Accept either Agent or BrowserContext
-    if hasattr(agent_or_context, "browser_context"):
-        browser_context = getattr(agent_or_context, "browser_context", None)
-    else:
-        browser_context = agent_or_context
+    # Handle different input types
+    browser_session = None
 
-    if browser_context is None:
-        logger.warning(f"No browser_context available for task {task_id}")
+    if hasattr(agent_or_context, "browser_session"):
+        # This is an Agent instance
+        browser_session = getattr(agent_or_context, "browser_session", None)
+    elif hasattr(agent_or_context, "take_screenshot"):
+        # This is already a browser session/context
+        browser_session = agent_or_context
+    else:
+        logger.warning(f"Unable to determine browser session type for task {task_id}")
         return
 
-    # Defensive: check for take_screenshot method
-    if not hasattr(browser_context, "take_screenshot"):
-        logger.error(f"browser_context does not have take_screenshot for task {task_id}")
+    if browser_session is None:
+        logger.warning(f"No browser session available for task {task_id}")
+        return
+
+    # Check for take_screenshot method
+    if not hasattr(browser_session, "take_screenshot"):
+        logger.error(
+            f"browser_session does not have take_screenshot method for task {task_id}"
+        )
         return
 
     try:
-        screenshot_b64 = await browser_context.take_screenshot(full_page=True)
+        screenshot_b64 = await browser_session.take_screenshot(full_page=True)
 
         if not screenshot_b64:
             logger.warning("Screenshot unavailable")
@@ -636,9 +608,7 @@ async def stop_task(task_id: str, user_id: str = Depends(get_user_id)):
         TaskStatus.FAILED,
         TaskStatus.STOPPED,
     ]:
-        return {
-            "message": f"Task already in terminal state: {task['status']}"
-        }
+        return {"message": f"Task already in terminal state: {task['status']}"}
 
     # Get agent
     agent = task_storage.get_task_agent(task_id, user_id)
@@ -699,7 +669,7 @@ async def resume_task(task_id: str, user_id: str = Depends(get_user_id)):
 async def list_tasks(
     user_id: str = Depends(get_user_id),
     page: int = Query(1, ge=1),
-    per_page: int = Query(100, ge=1, le=1000)
+    per_page: int = Query(100, ge=1, le=1000),
 ):
     """List all tasks"""
     return task_storage.list_tasks(user_id, page, per_page)
@@ -890,7 +860,9 @@ async def browser_config():
 
 
 @app.get("/api/v1/task/{task_id}/media")
-async def get_task_media(task_id: str, user_id: str = Depends(get_user_id), type: Optional[str] = None):
+async def get_task_media(
+    task_id: str, user_id: str = Depends(get_user_id), type: Optional[str] = None
+):
     """Returns links to any recordings or media generated during task execution"""
     task = task_storage.get_task(task_id, user_id)
     if not task:
@@ -919,16 +891,14 @@ async def get_task_media(task_id: str, user_id: str = Depends(get_user_id), type
         logger.warning(f"Media directory for task {task_id} does not exist")
 
     # If we have files but no media entries, create them now
-    if media_files and (
-        not task.get("media") or len(task.get("media", [])) == 0
-    ):
+    if media_files and (not task.get("media") or len(task.get("media", [])) == 0):
         for file_path in media_files:
             if file_path.suffix.lower() in [".png", ".jpg", ".jpeg"]:
                 file_url = f"/media/{task_id}/{file_path.name}"
                 media_entry = {
-                    "url": file_url, 
-                    "type": "screenshot", 
-                    "filename": file_path.name
+                    "url": file_url,
+                    "type": "screenshot",
+                    "filename": file_path.name,
                 }
                 task_storage.add_task_media(task_id, media_entry, user_id)
 
@@ -966,7 +936,9 @@ async def get_task_media(task_id: str, user_id: str = Depends(get_user_id), type
 
 
 @app.get("/api/v1/task/{task_id}/media/list")
-async def list_task_media(task_id: str, user_id: str = Depends(get_user_id), type: Optional[str] = None):
+async def list_task_media(
+    task_id: str, user_id: str = Depends(get_user_id), type: Optional[str] = None
+):
     """Returns detailed information about media files associated with a task"""
     # Check if the media directory exists
     task_media_dir = MEDIA_DIR / task_id
@@ -1058,7 +1030,7 @@ async def test_screenshot(ai_provider: str = "google"):
         # Configure browser
         headful = os.environ.get("BROWSER_USE_HEADFUL", "false").lower() == "true"
         browser_config_args = {
-            "headless": not headful, 
+            "headless": not headful,
             "chrome_instance_path": None,
         }
 
