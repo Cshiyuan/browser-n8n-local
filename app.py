@@ -42,8 +42,7 @@ from pydantic import BaseModel
 
 from browser_use import Agent
 from browser_use.agent.views import AgentHistoryList
-from browser_use import BrowserConfig, Browser
-from browser_use.browser.context import BrowserContext
+from browser_use import BrowserProfile, Browser
 
 from browser_use.llm import (
     ChatAnthropic,
@@ -296,7 +295,7 @@ async def execute_task(
                     f"Task {task_id}: Using Chrome user data directory: {chrome_user_data}"
                 )
 
-            browser_config = BrowserConfig(**browser_config_args)
+            browser_config = BrowserProfile(**browser_config_args)
             browser = Browser(browser_profile=browser_config)
 
             # Add browser to agent kwargs - let Agent manage its own browser session
@@ -1040,20 +1039,17 @@ async def test_screenshot(ai_provider: str = "google"):
             browser_config_args["chrome_instance_path"] = chrome_path
 
         logger.info(f"Creating browser with config: {browser_config_args}")
-        browser_config = BrowserConfig(**browser_config_args)
+        browser_config = BrowserProfile(**browser_config_args)
         browser_service = Browser(browser_profile=browser_config)
 
-        # Create a BrowserContext instance which has the take_screenshot method
-        browser_context = BrowserContext(browser=browser_service.browser)
+        # Start the browser and navigate to example.com
+        async with browser_service:
+            logger.info("Browser created, navigating to example.com")
+            await browser_service.navigate_to("https://example.com")
 
-        # Start the context and navigate to example.com
-        async with browser_context:
-            logger.info("BrowserContext created, navigating to example.com")
-            await browser_context.navigate_to("https://example.com")
-
-            # Now call take_screenshot on the context
-            logger.info("Taking screenshot using browser_context.take_screenshot")
-            screenshot_b64 = await browser_context.take_screenshot(full_page=True)
+            # Now call take_screenshot on the browser directly
+            logger.info("Taking screenshot using browser_service.take_screenshot")
+            screenshot_b64 = await browser_service.take_screenshot(full_page=True)
 
             if not screenshot_b64:
                 return {"error": "Screenshot returned None or empty string"}
