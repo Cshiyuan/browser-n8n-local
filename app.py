@@ -35,7 +35,6 @@ from pydantic import BaseModel
 # from browser_use import Agent
 # from browser_use.agent.views import AgentHistoryList
 # from browser_use import BrowserConfig, Browser
-# from browser_use.browser.browser import Browser, BrowserConfig
 # from browser_use.browser.context import BrowserContext
 
 # from browser_use.llm import LLMProvider
@@ -43,6 +42,7 @@ from pydantic import BaseModel
 from browser_use import Agent
 from browser_use.agent.views import AgentHistoryList
 from browser_use import BrowserProfile, Browser
+
 
 from browser_use.llm import (
     ChatAnthropic,
@@ -275,6 +275,8 @@ async def execute_task(
             browser_config_args = {
                 "headless": not headful,
                 "chrome_instance_path": None,
+                "viewport": {"width": 1280, "height": 720},
+                "window_size": {"width": 1280, "height": 720},
             }
             # For older Chrome versions
             extra_chromium_args += ["--headless=new"]
@@ -533,10 +535,52 @@ async def capture_screenshot(agent_or_context, task_id, user_id=DEFAULT_USER_ID)
         return
 
     try:
-        screenshot_b64 = await browser_session.take_screenshot(full_page=True)
+        # Try to get current page dimensions for debugging
+        try:
+            if hasattr(browser_session, "get_current_page"):
+                page = await browser_session.get_current_page()
+                if page and hasattr(page, "viewport_size"):
+                    viewport_info = await page.viewport_size()
+                    logger.info(f"Current viewport size: {viewport_info}")
+        except Exception as viewport_e:
+            logger.debug(f"Could not get viewport info: {viewport_e}")
+
+        # Try taking screenshot with error handling for zero width issue
+        logger.debug(f"Attempting to take screenshot for task {task_id}")
+        try:
+            screenshot_b64 = await browser_session.take_screenshot(full_page=True)
+            logger.debug(f"Screenshot method returned type: {type(screenshot_b64)}")
+
+            # Quick validation of returned data
+            if screenshot_b64 and isinstance(screenshot_b64, str):
+                if len(screenshot_b64) < 100:
+                    logger.warning(
+                        f"Screenshot data suspiciously short: {len(screenshot_b64)} chars"
+                    )
+                    logger.warning(f"Data: {screenshot_b64}")
+
+                    # Try alternative screenshot method if available
+                    logger.info(
+                        "Attempting alternative screenshot method without full_page"
+                    )
+                    try:
+                        screenshot_b64 = await browser_session.take_screenshot(
+                            full_page=False
+                        )
+                        logger.debug(
+                            f"Alternative screenshot length: {len(screenshot_b64) if screenshot_b64 else 0}"
+                        )
+                    except Exception as alt_error:
+                        logger.error(f"Alternative screenshot also failed: {alt_error}")
+
+        except Exception as screenshot_error:
+            logger.error(
+                f"Browser session screenshot method failed: {screenshot_error}"
+            )
+            return
 
         if not screenshot_b64:
-            logger.warning("Screenshot unavailable")
+            logger.warning("Screenshot unavailable - empty response from browser")
             return
 
         # Save screenshot with appropriate file handling
@@ -560,7 +604,91 @@ async def capture_screenshot(agent_or_context, task_id, user_id=DEFAULT_USER_ID)
         screenshot_path = task_media_dir / screenshot_filename
 
         try:
-            image_data = base64.b64decode(screenshot_b64)
+            # Debug: log info about the base64 data
+            logger.debug(
+                f"Screenshot base64 length: {len(screenshot_b64) if screenshot_b64 else 0}"
+            )
+            logger.debug(
+                f"Screenshot base64 first 50 chars: {screenshot_b64[:50] if screenshot_b64 else 'None'}"
+            )
+
+            # Validate base64 data before decoding
+            if not screenshot_b64:
+                logger.error("Empty screenshot base64 data")
+                return
+
+            # Handle different data types from take_screenshot
+            if isinstance(screenshot_b64, bytes):
+                logger.debug(
+                    "Screenshot returned as bytes - using directly as image data"
+                )
+                image_data = screenshot_b64
+                # Skip base64 decoding since we already have bytes
+            elif isinstance(screenshot_b64, str):
+                logger.debug("Screenshot returned as base64 string - decoding")
+                # Continue with base64 decoding process below
+                screenshot_is_b64_string = True
+            else:
+                logger.error(
+                    f"Screenshot data is unexpected type: {type(screenshot_b64)}"
+                )
+                return
+
+            # Process screenshot data based on type
+            if isinstance(screenshot_b64, str):
+                # Check for known corrupted pattern in base64 strings
+                try:
+                    temp_decode = base64.b64decode(screenshot_b64[:20])
+                    if temp_decode.startswith(b"<\xd1\x88\x1c4U"):
+                        logger.error(
+                            "Detected corrupted screenshot pattern - screenshot capture is failing"
+                        )
+                        return
+                except Exception:
+                    pass  # Continue with normal processing if quick check fails
+
+                # Clean base64 data (remove data URL prefix if present)
+                if screenshot_b64.startswith("data:image/"):
+                    # Remove data URL prefix like "data:image/png;base64,"
+                    screenshot_b64 = screenshot_b64.split(",", 1)[1]
+                    logger.debug("Removed data URL prefix from screenshot")
+
+                # Validate base64 format
+                import string
+
+                valid_b64_chars = string.ascii_letters + string.digits + "+/="
+                if not all(c in valid_b64_chars for c in screenshot_b64):
+                    logger.error("Screenshot data contains invalid base64 characters")
+                    logger.debug(
+                        f"Invalid chars found in first 200 chars: {[c for c in screenshot_b64[:200] if c not in valid_b64_chars]}"
+                    )
+                    return
+
+                image_data = base64.b64decode(screenshot_b64)
+                logger.debug(f"Decoded image data length: {len(image_data)} bytes")
+            # If image_data was already set above (bytes case), we skip base64 decoding
+
+            # Ensure we have image_data (should be set in either case above)
+            if "image_data" not in locals():
+                logger.error("Image data not set - this shouldn't happen")
+                return
+
+            logger.debug(f"Final image data length: {len(image_data)} bytes")
+
+            # Validate PNG header
+            png_signature = b"\x89PNG\r\n\x1a\n"
+            if not image_data.startswith(png_signature):
+                logger.warning("Image data does not have valid PNG signature")
+                logger.debug(
+                    f"Image data starts with: {image_data[:20].hex() if len(image_data) >= 20 else 'too short'}"
+                )
+
+                # Don't save invalid image data
+                logger.error(
+                    "Refusing to save invalid image data - screenshot capture appears to be broken"
+                )
+                return
+
             with open(screenshot_path, "wb") as f:
                 f.write(image_data)
 
@@ -582,7 +710,94 @@ async def capture_screenshot(agent_or_context, task_id, user_id=DEFAULT_USER_ID)
             logger.error(f"Error saving screenshot: {str(e)}")
 
     except Exception as e:
-        logger.error(f"Error taking screenshot: {str(e)}")
+        error_str = str(e)
+        logger.error(f"Error taking screenshot: {error_str}")
+
+        # Try fallback screenshot without full_page if we get a width error
+        if "0 width" in error_str or "width" in error_str.lower():
+            logger.info(
+                f"Attempting fallback screenshot without full_page for task {task_id}"
+            )
+            try:
+                screenshot_b64 = await browser_session.take_screenshot(full_page=False)
+                if screenshot_b64:
+                    logger.info("Fallback screenshot successful")
+                    # Save the fallback screenshot using the same logic
+                    task_media_dir = MEDIA_DIR / task_id
+                    task_media_dir.mkdir(exist_ok=True, parents=True)
+                    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                    task = task_storage.get_task(task_id, user_id)
+                    if task and "steps" in task and task["steps"]:
+                        current_step = task["steps"][-1]["step"] - 1
+                    else:
+                        current_step = "initial"
+
+                    if task and task["status"] == TaskStatus.FINISHED:
+                        screenshot_filename = f"final-fallback-{timestamp}.png"
+                    elif task and task["status"] == TaskStatus.RUNNING:
+                        screenshot_filename = (
+                            f"status-step-{current_step}-fallback-{timestamp}.png"
+                        )
+                    else:
+                        task_status = task["status"] if task else "unknown"
+                        screenshot_filename = (
+                            f"status-{task_status}-fallback-{timestamp}.png"
+                        )
+
+                    screenshot_path = task_media_dir / screenshot_filename
+
+                    try:
+                        # Debug fallback screenshot data
+                        logger.debug(
+                            f"Fallback screenshot data type: {type(screenshot_b64)}, length: {len(screenshot_b64) if screenshot_b64 else 0}"
+                        )
+
+                        # Handle fallback screenshot data based on type
+                        if isinstance(screenshot_b64, bytes):
+                            logger.debug(
+                                "Fallback screenshot returned as bytes - using directly"
+                            )
+                            image_data = screenshot_b64
+                        elif isinstance(screenshot_b64, str):
+                            # Clean base64 data (remove data URL prefix if present)
+                            if screenshot_b64.startswith("data:image/"):
+                                screenshot_b64 = screenshot_b64.split(",", 1)[1]
+                                logger.debug(
+                                    "Removed data URL prefix from fallback screenshot"
+                                )
+                            image_data = base64.b64decode(screenshot_b64)
+                        else:
+                            logger.error(
+                                f"Fallback screenshot has unexpected type: {type(screenshot_b64)}"
+                            )
+                            return
+
+                        logger.debug(
+                            f"Fallback final image data length: {len(image_data)} bytes"
+                        )
+
+                        with open(screenshot_path, "wb") as f:
+                            f.write(image_data)
+
+                        if (
+                            screenshot_path.exists()
+                            and screenshot_path.stat().st_size > 0
+                        ):
+                            logger.info(f"Fallback screenshot saved: {screenshot_path}")
+                            screenshot_url = f"/media/{task_id}/{screenshot_filename}"
+                            media_entry = {
+                                "url": screenshot_url,
+                                "type": "screenshot",
+                                "filename": screenshot_filename,
+                                "created_at": datetime.now(UTC).isoformat() + "Z",
+                            }
+                            task_storage.add_task_media(task_id, media_entry, user_id)
+                    except Exception as fallback_save_e:
+                        logger.error(
+                            f"Error saving fallback screenshot: {fallback_save_e}"
+                        )
+            except Exception as fallback_e:
+                logger.error(f"Fallback screenshot also failed: {fallback_e}")
 
 
 @app.get("/api/v1/task/{task_id}", response_model=dict)
@@ -1019,91 +1234,128 @@ async def get_media_file(
 
 @app.get("/api/v1/test-screenshot")
 async def test_screenshot(ai_provider: str = "google"):
-    """Test endpoint to verify screenshot functionality using the BrowserContext"""
+    """Test endpoint to verify screenshot functionality using Agent like the main task flow"""
     logger.info(f"Testing screenshot functionality with provider: {ai_provider}")
 
-    browser_service = None
-    browser_context = None
+    agent = None
+    browser = None
 
     try:
-        # Configure browser
+        # Get LLM provider (simplified version)
+        if ai_provider.lower() == "google":
+            llm = ChatGoogle(model="gemini-1.5-flash")
+        elif ai_provider.lower() == "openai":
+            llm = ChatOpenAI(model="gpt-4o")
+        else:
+            llm = ChatGoogle(model="gemini-1.5-flash")
+
+        # Configure browser same as main code
         headful = os.environ.get("BROWSER_USE_HEADFUL", "false").lower() == "true"
         browser_config_args = {
             "headless": not headful,
             "chrome_instance_path": None,
+            "viewport": {"width": 1280, "height": 720},
+            "window_size": {"width": 1280, "height": 720},
         }
 
-        # Add Chrome executable path if provided
         chrome_path = os.environ.get("CHROME_PATH")
         if chrome_path:
             browser_config_args["chrome_instance_path"] = chrome_path
 
         logger.info(f"Creating browser with config: {browser_config_args}")
         browser_config = BrowserProfile(**browser_config_args)
-        browser_service = Browser(browser_profile=browser_config)
+        browser = Browser(browser_profile=browser_config)
 
-        # Start the browser and navigate to example.com
-        async with browser_service:
-            logger.info("Browser created, navigating to example.com")
-            await browser_service.navigate_to("https://example.com")
+        # Create Agent with browser (like main code)
+        task_instruction = "Navigate to example.com and take a screenshot"
 
-            # Now call take_screenshot on the browser directly
-            logger.info("Taking screenshot using browser_service.take_screenshot")
-            screenshot_b64 = await browser_service.take_screenshot(full_page=True)
+        agent = Agent(
+            task_instruction,
+            llm=llm,
+            browser=browser,
+        )
 
-            if not screenshot_b64:
-                return {"error": "Screenshot returned None or empty string"}
+        # Initialize agent browser session first (this might be needed)
+        logger.info("Checking agent browser session initialization")
+        logger.info(f"Agent has browser_session: {hasattr(agent, 'browser_session')}")
 
-            logger.info(f"Screenshot captured: {len(screenshot_b64)} bytes")
+        # Try to access browser_session to trigger initialization
+        try:
+            if hasattr(agent, "browser_session"):
+                logger.info(f"browser_session type: {type(agent.browser_session)}")
+                logger.info(f"browser_session is None: {agent.browser_session is None}")
 
-            # Create test directory and save screenshot
-            test_dir = MEDIA_DIR / "test"
-            test_dir.mkdir(exist_ok=True, parents=True)
-            screenshot_path = test_dir / "test_screenshot.png"
+            # Navigate to test page
+            logger.info("Navigating to example.com for test")
+            await agent.browser_session.navigate_to("https://example.com")
 
+            logger.info("Navigation completed, browser_session should be ready now")
+
+            # Test screenshot using our capture_screenshot function
+            logger.info("Testing screenshot capture")
+            test_task_id = "screenshot-test"
+
+            # First try direct screenshot
+            logger.info("Trying direct screenshot on browser_session")
             try:
-                # Decode and save screenshot
-                image_data = base64.b64decode(screenshot_b64)
-                logger.info(f"Decoded base64 data: {len(image_data)} bytes")
-
-                with open(screenshot_path, "wb") as f:
-                    f.write(image_data)
-
-                if screenshot_path.exists():
-                    file_size = screenshot_path.stat().st_size
+                direct_screenshot = await agent.browser_session.take_screenshot(
+                    full_page=True
+                )
+                logger.info(f"Direct screenshot result type: {type(direct_screenshot)}")
+                logger.info(
+                    f"Direct screenshot length: {len(direct_screenshot) if direct_screenshot else 0}"
+                )
+                if direct_screenshot:
                     logger.info(
-                        f"Screenshot saved: {screenshot_path} ({file_size} bytes)"
+                        f"Direct screenshot first 100 chars: {direct_screenshot[:100]}"
                     )
+            except Exception as direct_error:
+                logger.error(f"Direct screenshot failed: {direct_error}")
 
-                    return {
-                        "success": True,
-                        "message": "Screenshot captured and saved successfully",
-                        "file_size": file_size,
-                        "file_path": str(screenshot_path),
-                        "url": f"/media/test/test_screenshot.png",
-                        "working_method": "browser_context.take_screenshot",
-                    }
-                else:
-                    return {"error": "File not created"}
-            except Exception as e:
-                logger.exception("Error saving screenshot")
-                return {"error": f"Error saving screenshot: {str(e)}"}
+            # Then try our capture_screenshot function
+            await capture_screenshot(agent, test_task_id, "test-user")
+
+        except Exception as nav_error:
+            logger.error(f"Error during navigation or screenshot: {nav_error}")
+            return {"error": f"Navigation/screenshot error: {nav_error}"}
+
+        # Check if screenshot was created
+        test_media_dir = MEDIA_DIR / test_task_id
+        logger.info(f"Checking for media directory: {test_media_dir}")
+        logger.info(f"Media directory exists: {test_media_dir.exists()}")
+        if test_media_dir.exists():
+            screenshots = list(test_media_dir.glob("*.png"))
+            if screenshots:
+                latest_screenshot = max(screenshots, key=lambda x: x.stat().st_mtime)
+                file_size = latest_screenshot.stat().st_size
+
+                logger.info(
+                    f"Test screenshot found: {latest_screenshot} ({file_size} bytes)"
+                )
+
+                return {
+                    "success": True,
+                    "message": "Screenshot test completed",
+                    "file_size": file_size,
+                    "file_path": str(latest_screenshot),
+                    "url": f"/media/{test_task_id}/{latest_screenshot.name}",
+                    "working_method": "agent.browser_session.take_screenshot via capture_screenshot",
+                }
+            else:
+                return {"error": "No screenshots found after test"}
+        else:
+            return {"error": "Test media directory not created"}
+
     except Exception as e:
         logger.exception("Error in screenshot test")
         return {"error": f"Test failed: {str(e)}"}
     finally:
         # Clean up resources
-        if browser_context:
+        if browser:
             try:
-                await browser_context.close()
+                await browser.stop()  # Use stop instead of close for Browser
             except Exception as e:
-                logger.warning(f"Error closing browser context: {str(e)}")
-
-        if browser_service:
-            try:
-                await browser_service.close()
-            except Exception as e:
-                logger.warning(f"Error closing browser: {str(e)}")
+                logger.warning(f"Error stopping browser: {str(e)}")
 
 
 # Run server if executed directly
