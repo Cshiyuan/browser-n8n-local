@@ -2,7 +2,7 @@ from typing import Dict, Optional, Any
 from datetime import datetime, UTC
 import logging
 
-from task_storage.base import TaskStorage, DEFAULT_USER_ID
+from task.storage.base import TaskStorage, DEFAULT_USER_ID
 
 logger = logging.getLogger("browser-use-bridge")
 

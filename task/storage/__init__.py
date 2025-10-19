@@ -1,5 +1,5 @@
-from task_storage.base import TaskStorage
-from task_storage.memory import InMemoryTaskStorage
+from task.storage.base import TaskStorage
+from task.storage.memory import InMemoryTaskStorage
 
 __all__ = ["TaskStorage", "InMemoryTaskStorage"]
 
