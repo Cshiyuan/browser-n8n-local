@@ -22,7 +22,7 @@ task_storage = get_task_storage()
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI):
     """Handle application startup and shutdown"""
     # Startup
     logger.info("Browser Use Bridge API starting up...")
@@ -87,7 +87,7 @@ async def run_server():
     if sys.platform != "win32":
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, signal_handler)
+            loop.add_signal_handler(sig, signal_handler)  # type: ignore[arg-type]
 
     # Start the server
     logger.info(f"Starting Browser Use Bridge API on port {port}")

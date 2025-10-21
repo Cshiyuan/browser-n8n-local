@@ -150,11 +150,68 @@ If `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_REGION` are not explic
 - `LOG_LEVEL`: Logging level (default: `INFO`).
 - `BROWSER_USE_HEADFUL`: Set to `"true"` to run the browser in headful mode (default: `false`, runs in headless mode).
 
+## Testing
+
+This project includes a comprehensive test suite to verify API functionality.
+
+### Quick Test
+
+```bash
+# Run all tests
+./run_tests.sh
+
+# Or directly with Python
+python test/run_tests.py
+```
+
+### Test Options
+
+```bash
+# Run specific test suite
+python test/run_tests.py --suite basic_tests
+
+# Run multiple test suites
+python test/run_tests.py --suite basic_tests --suite vision_tests
+
+# Verbose output
+python test/run_tests.py --verbose
+
+# Generate JSON report
+python test/run_tests.py --report test_results.json
+```
+
+### Interactive Testing
+
+```bash
+# Run interactive tests
+python test/test_api.py
+
+# Test specific features
+python test/test_api.py --test vision
+python test/test_api.py --test schema
+python test/test_api.py --test control
+```
+
+### Test Documentation
+
+For detailed testing documentation, see:
+- [test/README.md](test/README.md) - Test suite overview
+- [test/TEST_GUIDE.md](test/TEST_GUIDE.md) - Detailed testing guide
+
+### Available Test Suites
+
+| Suite | Description | Tests |
+|-------|-------------|-------|
+| `basic_tests` | 基础功能测试 | 搜索、导航、截图 |
+| `vision_tests` | Vision 功能测试 | use_vision 参数的三种模式 |
+| `schema_tests` | 结构化输出测试 | JSON Schema 解析和验证 |
+
 ## Troubleshooting
 
 - **ImportError with browser-use**: Make sure you have installed the browser-use package and its dependencies correctly.
 - **API Key Issues**: Verify that your API keys are correctly set in the `.env` file.
 - **Port Conflicts**: If port 8000 is already in use, set a different port in the `.env` file.
+- **Test Failures**: Run tests with `--verbose` flag to see detailed error messages
 
 ## License
 

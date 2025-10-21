@@ -6,14 +6,14 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from browser_use import BrowserProfile, Browser
+from browser_use import BrowserProfile, BrowserSession
 
 from task.constants import logger
 
 
 def configure_browser_profile(
     task_browser_config: dict,
-) -> tuple[Optional[Browser], dict]:
+) -> tuple[Optional[BrowserSession], dict]:
     """Configure browser based on task and environment settings"""
     # Configure browser headless/headful mode (task setting overrides env var)
     task_headful = task_browser_config.get("headful")
@@ -41,7 +41,6 @@ def configure_browser_profile(
 
     # Only configure browser if we need custom setup
     if not headful or chrome_path:
-        extra_chromium_args = ["--headless=new"]
         browser_config_args = {
             "headless": not headful,
             "chrome_instance_path": None,
@@ -59,7 +58,7 @@ def configure_browser_profile(
 
         # storage_state: 固定路径保存 cookies
         storage_state_path = browser_data_dir / "storage_state.json"
-        browser_config_args["storage_state"] = str(storage_state_path)
+        browser_config_args["storage_state"] = str(storage_state_path)  # type: ignore[assignment]
 
         # user_data_dir: 环境变量指定或创建临时目录
         if chrome_user_data:
@@ -69,7 +68,7 @@ def configure_browser_profile(
             unique_id = str(uuid.uuid4())[:8]
             user_data_path = browser_data_dir / f"tmp_user_data_{timestamp}_{unique_id}"
 
-        browser_config_args["user_data_dir"] = str(user_data_path)
+        browser_config_args["user_data_dir"] = str(user_data_path)  # type: ignore[assignment]
         logger.info(f"Browser storage: state={storage_state_path}, data={user_data_path}")
 
         # 支持自定义 window_config
@@ -79,7 +78,7 @@ def configure_browser_profile(
             logger.info(f"Using custom window config: {window_config}")
 
         browser_config = BrowserProfile(**browser_config_args)
-        browser = Browser(browser_profile=browser_config)
+        browser = BrowserSession(browser_profile=browser_config)
         browser_info["browser_config_args"] = browser_config_args
 
     return browser, browser_info

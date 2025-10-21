@@ -16,6 +16,8 @@ class TaskRequest(BaseModel):
     use_custom_chrome: Optional[bool] = (
         None  # Whether to use custom Chrome from env vars
     )
+    use_vision: Optional[str] = "auto"  # Vision capability: 'auto', 'true', or 'false'
+    output_model_schema: Optional[str] = None  # JSON schema string for structured output
 
 
 class TaskResponse(BaseModel):

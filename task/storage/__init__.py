@@ -1,7 +1,7 @@
 from task.storage.base import TaskStorage
 from task.storage.memory import InMemoryTaskStorage
 
-__all__ = ["TaskStorage", "InMemoryTaskStorage"]
+__all__ = ["TaskStorage", "InMemoryTaskStorage", "get_task_storage"]
 
 # Factory function to get the default task storage implementation
 def get_task_storage(storage_type="memory") -> TaskStorage:

@@ -5,7 +5,7 @@ pydantic>=2.5.0
 python-dotenv>=1.0.0
 
 # 核心依赖 - Browser-Use (匹配 browser-brain)
-browser-use>=0.8.0
+browser-use @ git+https://github.com/browser-use/browser-use.git@6d3e276
 playwright>=1.40.0
 
 # AI/LLM 依赖 (使用 0.3.x 版本以保持与 browser-brain 一致)
@@ -20,4 +20,6 @@ langchain-aws>=0.0.1
 # 其他工具
 openai>=1.0.0
 anthropic>=0.8.0
-google-generativeai>=0.3.0 
+google-generativeai>=0.3.0
+requests>=2.31.0  # For test_api.py
+pyyaml>=6.0  # For test management 

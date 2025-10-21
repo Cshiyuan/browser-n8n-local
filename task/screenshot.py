@@ -14,7 +14,6 @@ def process_screenshot_data(screenshot_data) -> Optional[bytes]:
         logger.warning("No screenshot data provided")
         return None
 
-    image_data = None
     if isinstance(screenshot_data, bytes):
         image_data = screenshot_data
     elif isinstance(screenshot_data, str):
@@ -185,7 +184,6 @@ async def capture_screenshot(agent_or_context, task_id, user_id=DEFAULT_USER_ID,
     logger.info(f"Capturing screenshot for task: {task_id}")
 
     # Handle different input types to get browser_session
-    browser_session = None
     if hasattr(agent_or_context, "browser_session"):
         browser_session = getattr(agent_or_context, "browser_session", None)
     elif hasattr(agent_or_context, "take_screenshot"):
@@ -216,7 +214,7 @@ async def capture_screenshot(agent_or_context, task_id, user_id=DEFAULT_USER_ID,
                     f"Browser session disconnected for task {task_id}, skipping screenshot"
                 )
                 return
-        except Exception:
+        except (AttributeError, RuntimeError):
             # If we can't check connection status, we'll try the screenshot anyway
             pass
 

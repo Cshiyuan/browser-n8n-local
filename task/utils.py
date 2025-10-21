@@ -1,7 +1,6 @@
 """Utility functions for task management"""
 
 import os
-from pathlib import Path
 
 from task.constants import MEDIA_DIR, logger
 
@@ -15,7 +14,7 @@ def get_sensitive_data():
     return sensitive_data
 
 
-def prepare_task_environment(task_id: str, user_id: str):
+def prepare_task_environment(task_id: str, _user_id: str):
     """Prepare task environment and media directory"""
     # Create task media directory up front
     task_media_dir = MEDIA_DIR / task_id

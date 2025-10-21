@@ -3,7 +3,7 @@
 import asyncio
 from typing import Optional
 
-from browser_use import Agent, Browser
+from browser_use import Agent, BrowserSession
 from browser_use.agent.views import AgentHistoryList
 
 from task.constants import TaskStatus, logger
@@ -13,6 +13,7 @@ from task.agent import create_agent_config
 from task.utils import get_sensitive_data, prepare_task_environment
 from task.screenshot import automated_screenshot, capture_screenshot
 from task.storage.base import DEFAULT_USER_ID
+from task.schema_utils import parse_output_model_schema
 
 
 async def process_task_result(result, task_id: str, user_id: str, task_storage):
@@ -59,7 +60,7 @@ async def collect_browser_cookies(agent, task_id: str, user_id: str, task_storag
         )
 
 
-async def cleanup_task(browser: Optional[Browser], task_id: str, user_id: str, task_storage):
+async def cleanup_task(browser: Optional[BrowserSession], task_id: str, user_id: str, task_storage):
     """Clean up task resources and take final screenshot"""
     if browser is not None:
         logger.info(f"Closing browser for task {task_id}")
@@ -104,9 +105,36 @@ async def execute_task(
         browser, browser_info = configure_browser_profile(task_browser_config)
         logger.info(f"Task {task_id}: Browser configuration: {browser_info}")
 
-        # Create agent
+        # Process agent configuration options
+        use_vision = None
+        output_model = None
+
+        # Extract and convert use_vision parameter
+        use_vision_str = task.get("use_vision") if task else None
+        if use_vision_str:
+            if use_vision_str.lower() == "auto":
+                use_vision = "auto"
+            elif use_vision_str.lower() == "true":
+                use_vision = True
+            elif use_vision_str.lower() == "false":
+                use_vision = False
+            logger.info(f"Task {task_id}: use_vision set to {use_vision}")
+
+        # Parse output model schema if provided
+        output_model_schema_str = task.get("output_model_schema") if task else None
+        if output_model_schema_str:
+            logger.info(f"Task {task_id}: Parsing output model schema")
+            output_model = parse_output_model_schema(output_model_schema_str)
+            if output_model:
+                logger.info(f"Task {task_id}: Successfully created output model: {output_model.__name__}")
+            else:
+                logger.warning(f"Task {task_id}: Failed to parse output model schema")
+
+        # Create agent with all configuration
         sensitive_data = get_sensitive_data()
-        agent_config = create_agent_config(instruction, llm, sensitive_data, browser)
+        agent_config = create_agent_config(
+            instruction, llm, sensitive_data, browser, use_vision, output_model
+        )
         logger.info(f"Agent config keys: {list(agent_config.keys())}")
 
         agent = Agent(**agent_config)

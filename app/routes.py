@@ -30,6 +30,19 @@ task_storage = get_task_storage()
 router = APIRouter()
 
 
+def _validate_task_and_get_agent(task_id: str, user_id: str, expected_status: TaskStatus):
+    """Helper function to validate task and get agent"""
+    task = task_storage.get_task(task_id, user_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    if task["status"] != expected_status:
+        return None, {"message": f"Task status is {task['status']}, expected {expected_status}"}
+
+    agent = task_storage.get_task_agent(task_id, user_id)
+    return agent, task
+
+
 @router.post("/api/v1/run-task", response_model=TaskResponse)
 async def run_task(request: TaskRequest, user_id: str = Depends(get_user_id)):
     """Start a browser automation task"""
@@ -58,6 +71,9 @@ async def run_task(request: TaskRequest, user_id: str = Depends(get_user_id)):
             "headful": request.headful,
             "use_custom_chrome": request.use_custom_chrome,
         },
+        # Agent configuration options
+        "use_vision": request.use_vision,
+        "output_model_schema": request.output_model_schema,
         "live_url": live_url,
     }
 
@@ -152,17 +168,13 @@ async def stop_task(task_id: str, user_id: str = Depends(get_user_id)):
 @router.put("/api/v1/pause-task/{task_id}")
 async def pause_task(task_id: str, user_id: str = Depends(get_user_id)):
     """Pause a running task"""
-    task = task_storage.get_task(task_id, user_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    agent, result = _validate_task_and_get_agent(task_id, user_id, TaskStatus.RUNNING)
 
-    if task["status"] != TaskStatus.RUNNING:
-        return {"message": f"Task not running: {task['status']}"}
+    # If result is a dict, it means status check failed
+    if isinstance(result, dict):
+        return result
 
-    # Get agent
-    agent = task_storage.get_task_agent(task_id, user_id)
     if agent:
-        # Call agent's pause method
         agent.pause()
         task_storage.update_task_status(task_id, TaskStatus.PAUSED, user_id)
         return {"message": "Task paused"}
@@ -173,17 +185,13 @@ async def pause_task(task_id: str, user_id: str = Depends(get_user_id)):
 @router.put("/api/v1/resume-task/{task_id}")
 async def resume_task(task_id: str, user_id: str = Depends(get_user_id)):
     """Resume a paused task"""
-    task = task_storage.get_task(task_id, user_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    agent, result = _validate_task_and_get_agent(task_id, user_id, TaskStatus.PAUSED)
 
-    if task["status"] != TaskStatus.PAUSED:
-        return {"message": f"Task not paused: {task['status']}"}
+    # If result is a dict, it means status check failed
+    if isinstance(result, dict):
+        return result
 
-    # Get agent
-    agent = task_storage.get_task_agent(task_id, user_id)
     if agent:
-        # Call agent's resume method
         agent.resume()
         task_storage.update_task_status(task_id, TaskStatus.RUNNING, user_id)
         return {"message": "Task resumed"}
@@ -387,7 +395,7 @@ async def browser_config():
 
 @router.get("/api/v1/task/{task_id}/media")
 async def get_task_media(
-    task_id: str, user_id: str = Depends(get_user_id), type: Optional[str] = None
+    task_id: str, user_id: str = Depends(get_user_id), media_type: Optional[str] = None
 ):
     """Returns links to any recordings or media generated during task execution"""
     task = task_storage.get_task(task_id, user_id)
@@ -436,10 +444,10 @@ async def get_task_media(
         media_list = []
 
     # Filter by type if specified
-    if type and isinstance(media_list, list):
+    if media_type and isinstance(media_list, list):
         if all(isinstance(item, dict) for item in media_list):
             # Dictionary format with type info
-            media_list = [item for item in media_list if item.get("type") == type]
+            media_list = [item for item in media_list if item.get("type") == media_type]
             recordings = [item["url"] for item in media_list]
         else:
             # Just URLs without type info
@@ -463,7 +471,7 @@ async def get_task_media(
 
 @router.get("/api/v1/task/{task_id}/media/list")
 async def list_task_media(
-    task_id: str, user_id: str = Depends(get_user_id), type: Optional[str] = None
+    task_id: str, user_id: str = Depends(get_user_id), media_type: Optional[str] = None
 ):
     """Returns detailed information about media files associated with a task"""
     # Check if the media directory exists
@@ -505,8 +513,8 @@ async def list_task_media(
         media_info.append(file_info)
 
     # Filter by type if specified
-    if type:
-        media_info = [item for item in media_info if item["type"] == type]
+    if media_type:
+        media_info = [item for item in media_info if item["type"] == media_type]
 
     logger.info(f"Returning {len(media_info)} media items for task {task_id}")
     return {"media": media_info, "count": len(media_info)}
@@ -562,14 +570,14 @@ async def test_screenshot(ai_provider: str = "google"):
 
         # Use our configure_browser_profile utility
         test_browser_config = {"headful": False}  # Force headless for testing
-        browser, browser_info = configure_browser_profile(test_browser_config)
+        browserSession, browser_info = configure_browser_profile(test_browser_config)
         logger.info(f"Test browser configuration: {browser_info}")
 
         # Use our create_agent_config utility
         task_instruction = "Navigate to example.com and take a screenshot"
         sensitive_data = get_sensitive_data()
         agent_config = create_agent_config(
-            task_instruction, llm, sensitive_data, browser
+            task_instruction, llm, sensitive_data, browserSession
         )
 
         agent = Agent(**agent_config)
