@@ -106,7 +106,8 @@ class TestBrowserN8N(unittest.TestCase):
             "ai_provider": AI_PROVIDER,
             "headful": HEADFUL,
             "use_vision": "auto",
-            "use_custom_chrome": "False"
+            "use_custom_chrome": "False",
+            "output_model_schema": "",
         }
 
         result = make_request("POST", url, data)
@@ -244,6 +245,105 @@ class TestBrowserN8N(unittest.TestCase):
             print(f"🔗 实时查看: {BASE_URL}{result.get('live_url')}")
 
             save_task_id(task_id)
+            return task_id
+        else:
+            print(f"\n❌ 任务创建失败")
+            return None
+
+
+    def test_xiaohongshu_login_check(self):
+        """测试：检查小红书账号是否已登录（带结构化输出）"""
+        print("=" * 60)
+        print("测试：小红书登录状态检查 - 带结构化输出")
+        print("=" * 60)
+
+        # 定义输出模型 schema
+        output_model_schema = {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "object",
+                    "properties": {
+                        "result": {
+                            "type": "string",
+                            "description": "登录状态：LOGGED_IN 表示已登录，LOGGED_OUT 表示未登录"
+                        },
+                    },
+                    "required": ["result"]
+                },
+                "type": {
+                    "type": "string",
+                    "description": "响应类型标识"
+                },
+                "msg": {
+                    "type": "string",
+                    "description": "响应消息"
+                }
+            },
+            "required": ["data", "type", "msg"]
+        }
+
+        # 任务描述
+        task_description = """任务：检查小红书账号是否已经登录
+
+具体步骤：
+1. 使用 go_to_url 操作访问: https://www.xiaohongshu.com/explore
+2. 判断用户是否已经登录，如果没有登录，则会有登录按钮，或者弹出登录框
+
+输出要求：
+- 使用 extract 操作输出结构化 JSON 格式
+- 如果登录或者没有登录，则返回 result 等于 LOGGED_IN 或者 LOGGED_OUT
+- type 字段设置为 "login_check"
+- msg 字段提供人类可读的状态描述
+"""
+
+        url = f"{BASE_URL}/api/v1/run-task"
+        data = {
+            "task": task_description,
+            "ai_provider": AI_PROVIDER,
+            "headful": HEADFUL,
+            "use_vision": "auto",
+            "use_custom_chrome": "False",
+            "output_model_schema": json.dumps(output_model_schema),
+        }
+
+        result = make_request("POST", url, data)
+
+        if result:
+            task_id = result.get('id')
+            print(f"\n✅ 任务创建成功!")
+            print(f"📋 任务 ID: {task_id}")
+            print(f"📊 初始状态: {result.get('status')}")
+            print(f"🔗 实时查看: {BASE_URL}{result.get('live_url')}")
+
+            save_task_id(task_id)
+
+            # 等待任务完成并获取结果
+            print("\n⏳ 等待任务执行...")
+            time.sleep(10)
+
+            # 获取任务结果
+            status_url = f"{BASE_URL}/api/v1/task/{task_id}/status"
+            status_result = make_request("GET", status_url, task_id=task_id)
+
+            if status_result and status_result.get('result'):
+                print("\n📊 结构化输出结果:")
+                try:
+                    structured_output = json.loads(status_result.get('result'))
+                    print(json.dumps(structured_output, indent=2, ensure_ascii=False))
+
+                    # 解析结果
+                    if 'data' in structured_output:
+                        data_obj = structured_output['data']
+                        login_status = data_obj.get('result', 'UNKNOWN')
+                        print(f"\n🔐 登录状态: {login_status}")
+                        if login_status == 'LOGGED_IN':
+                            print("✅ 用户已登录")
+                        else:
+                            print("❌ 用户未登录")
+                except json.JSONDecodeError:
+                    print("⚠️ 结果不是有效的 JSON 格式")
+
             return task_id
         else:
             print(f"\n❌ 任务创建失败")
