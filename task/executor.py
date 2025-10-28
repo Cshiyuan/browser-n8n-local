@@ -1,6 +1,5 @@
 """Task execution orchestration"""
 
-import asyncio
 from typing import Optional
 
 from browser_use import Agent, BrowserSession
@@ -11,7 +10,6 @@ from task.llm import get_llm
 from task.browser_config import configure_browser_profile
 from task.agent import create_agent_config
 from task.utils import get_sensitive_data, prepare_task_environment
-from task.screenshot import automated_screenshot, capture_screenshot
 from task.storage.base import DEFAULT_USER_ID
 from task.schema_utils import parse_output_model_schema
 
@@ -61,24 +59,13 @@ async def collect_browser_cookies(agent, task_id: str, user_id: str, task_storag
 
 
 async def cleanup_task(browser: Optional[BrowserSession], task_id: str, user_id: str, task_storage):
-    """Clean up task resources and take final screenshot"""
+    """Clean up task resources after execution"""
     if browser is not None:
         logger.info(f"Closing browser for task {task_id}")
         try:
-            logger.info(f"Taking final screenshot for task {task_id} after completion")
-
-            # Take final screenshot
-            agent = task_storage.get_task_agent(task_id, user_id)
-            if agent and hasattr(agent, "browser_session"):
-                await capture_screenshot(agent, task_id, user_id, task_storage)
+            await browser.stop()
         except Exception as e:
-            logger.error(f"Error taking final screenshot: {str(e)}")
-        finally:
-            if browser:
-                try:
-                    await browser.close()
-                except Exception as e:
-                    logger.error(f"Error closing browser for task {task_id}: {str(e)}")
+            logger.error(f"Error closing browser for task {task_id}: {str(e)}")
 
 
 async def execute_task(
@@ -89,8 +76,7 @@ async def execute_task(
     Chrome paths (CHROME_PATH and CHROME_USER_DATA) are only sourced from
     environment variables for security reasons.
     """
-    browser = None
-
+    browser: Optional[BrowserSession] = None
     try:
         # Update task status and prepare environment
         task_storage.update_task_status(task_id, TaskStatus.RUNNING, user_id)
@@ -140,12 +126,8 @@ async def execute_task(
         agent = Agent(**agent_config)
         task_storage.set_task_agent(task_id, agent, user_id)
 
-        # Execute task with automated screenshots
-        result = await agent.run(
-            on_step_start=lambda agent_instance: asyncio.create_task(
-                automated_screenshot(agent_instance, task_id, user_id, task_storage)
-            )
-        )
+        # Execute task without automated screenshots
+        result = await agent.run()
 
         # Process results
         task_storage.mark_task_finished(task_id, user_id, TaskStatus.FINISHED)

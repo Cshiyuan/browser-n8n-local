@@ -9,11 +9,10 @@ from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
 
 from app.routes import router
 from app.middleware import add_json_serialization, setup_cors
-from task.constants import MEDIA_DIR, logger
+from task.constants import logger
 from task.executor import cleanup_all_tasks
 from task.storage import get_task_storage
 
@@ -35,9 +34,6 @@ async def lifespan(_app: FastAPI):
 def create_app() -> FastAPI:
     """Create and configure FastAPI application"""
     app = FastAPI(title="Browser Use Bridge API", lifespan=lifespan)
-
-    # Mount static files
-    app.mount("/media", StaticFiles(directory=str(MEDIA_DIR)), name="media")
 
     # Add middleware
     app.middleware("http")(add_json_serialization)

@@ -1,26 +1,18 @@
 """API routes for browser automation tasks"""
 
 import asyncio
-import mimetypes
 import os
 import uuid
 from datetime import datetime, UTC
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Depends, Query
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse
 
 from app.models import TaskRequest, TaskResponse, TaskStatusResponse
 from app.dependencies import get_user_id
-from task.constants import TaskStatus, MEDIA_DIR, logger
+from task.constants import TaskStatus, logger
 from task.executor import execute_task
-from task.screenshot import capture_screenshot
-from task.llm import get_llm
-from task.browser_config import configure_browser_profile
-from task.agent import create_agent_config
-from task.utils import get_sensitive_data
-from browser_use import Agent
-from browser_use.llm import ChatGoogle, ChatOpenAI
 from task.storage import get_task_storage
 
 # Initialize task storage
@@ -112,14 +104,6 @@ async def get_task_status(task_id: str, user_id: str = Depends(get_user_id)):
 
         task_storage.add_task_step(task_id, step_info, user_id)
         logger.info(f"Added step {current_step} for task {task_id}")
-
-    try:
-        _ = agent.browser_session
-        await capture_screenshot(agent, task_id, user_id, task_storage)
-    except (AssertionError, AttributeError):
-        logger.info(
-            f"BrowserSession not ready for task {task_id}, skipping screenshot."
-        )
 
     return TaskStatusResponse(
         status=task["status"],
@@ -391,238 +375,3 @@ async def browser_config():
         "using_custom_chrome": chrome_path is not None,
         "using_user_data": chrome_user_data is not None,
     }
-
-
-@router.get("/api/v1/task/{task_id}/media")
-async def get_task_media(
-    task_id: str, user_id: str = Depends(get_user_id), media_type: Optional[str] = None
-):
-    """Returns links to any recordings or media generated during task execution"""
-    task = task_storage.get_task(task_id, user_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    # Check if task is completed
-    if task["status"] not in [
-        TaskStatus.FINISHED,
-        TaskStatus.FAILED,
-        TaskStatus.STOPPED,
-    ]:
-        raise HTTPException(
-            status_code=400, detail="Media only available for completed tasks"
-        )
-
-    # Check if the media directory exists and contains files
-    task_media_dir = MEDIA_DIR / task_id
-    media_files = []
-
-    if task_media_dir.exists():
-        media_files = list(task_media_dir.glob("*"))
-        logger.info(
-            f"Media directory for task {task_id} contains {len(media_files)} files: {[f.name for f in media_files]}"
-        )
-    else:
-        logger.warning(f"Media directory for task {task_id} does not exist")
-
-    # If we have files but no media entries, create them now
-    if media_files and (not task.get("media") or len(task.get("media", [])) == 0):
-        for file_path in media_files:
-            if file_path.suffix.lower() in [".png", ".jpg", ".jpeg"]:
-                file_url = f"/media/{task_id}/{file_path.name}"
-                media_entry = {
-                    "url": file_url,
-                    "type": "screenshot",
-                    "filename": file_path.name,
-                }
-                task_storage.add_task_media(task_id, media_entry, user_id)
-
-    # Get updated task with media
-    task = task_storage.get_task(task_id, user_id)
-    if task is not None:
-        media_list = task.get("media", [])
-    else:
-        media_list = []
-
-    # Filter by type if specified
-    if media_type and isinstance(media_list, list):
-        if all(isinstance(item, dict) for item in media_list):
-            # Dictionary format with type info
-            media_list = [item for item in media_list if item.get("type") == media_type]
-            recordings = [item["url"] for item in media_list]
-        else:
-            # Just URLs without type info
-            recordings = []
-            logger.warning(
-                f"Media list for task {task_id} doesn't contain type information"
-            )
-    else:
-        # Return all media
-        if isinstance(media_list, list):
-            if media_list and all(isinstance(item, dict) for item in media_list):
-                recordings = [item["url"] for item in media_list]
-            else:
-                recordings = media_list
-        else:
-            recordings = []
-
-    logger.info(f"Returning {len(recordings)} media items for task {task_id}")
-    return {"recordings": recordings}
-
-
-@router.get("/api/v1/task/{task_id}/media/list")
-async def list_task_media(
-    task_id: str, user_id: str = Depends(get_user_id), media_type: Optional[str] = None
-):
-    """Returns detailed information about media files associated with a task"""
-    # Check if the media directory exists
-    task_media_dir = MEDIA_DIR / task_id
-
-    if not task_storage.task_exists(task_id, user_id):
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    if not task_media_dir.exists():
-        return {
-            "media": [],
-            "count": 0,
-            "message": f"No media found for task {task_id}",
-        }
-
-    media_info = []
-
-    media_files = list(task_media_dir.glob("*"))
-    logger.info(f"Found {len(media_files)} media files for task {task_id}")
-
-    for file_path in media_files:
-        # Determine media type based on file extension
-        file_type = "unknown"
-        if file_path.suffix.lower() in [".png", ".jpg", ".jpeg"]:
-            file_type = "screenshot"
-        elif file_path.suffix.lower() in [".mp4", ".webm"]:
-            file_type = "recording"
-
-        # Get file stats
-        stats = file_path.stat()
-
-        file_info = {
-            "filename": file_path.name,
-            "type": file_type,
-            "size_bytes": stats.st_size,
-            "created_at": datetime.fromtimestamp(stats.st_ctime).isoformat(),
-            "url": f"/media/{task_id}/{file_path.name}",
-        }
-        media_info.append(file_info)
-
-    # Filter by type if specified
-    if media_type:
-        media_info = [item for item in media_info if item["type"] == media_type]
-
-    logger.info(f"Returning {len(media_info)} media items for task {task_id}")
-    return {"media": media_info, "count": len(media_info)}
-
-
-@router.get("/api/v1/media/{task_id}/{filename}")
-async def get_media_file(
-    task_id: str,
-    filename: str,
-    download: bool = Query(
-        False, description="Force download instead of viewing in browser"
-    ),
-):
-    """Serve a media file with options for viewing or downloading"""
-    # Construct the file path
-    file_path = MEDIA_DIR / task_id / filename
-
-    # Check if file exists
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Media file not found")
-
-    # Determine content type
-    content_type, _ = mimetypes.guess_type(file_path)
-
-    # Set headers based on download preference
-    headers = {}
-    if download:
-        headers["Content-Disposition"] = f'attachment; filename="{filename}"'
-    else:
-        headers["Content-Disposition"] = f'inline; filename="{filename}"'
-
-    # Return the file with appropriate headers
-    return FileResponse(
-        path=file_path, media_type=content_type, headers=headers, filename=filename
-    )
-
-
-@router.get("/api/v1/test-screenshot")
-async def test_screenshot(ai_provider: str = "google"):
-    """Test endpoint to verify screenshot functionality using refactored utility functions"""
-    logger.info(f"Testing screenshot functionality with provider: {ai_provider}")
-
-    browser = None
-    try:
-        # Use our get_llm utility (fallback for test providers)
-        if ai_provider.lower() == "google":
-            llm = ChatGoogle(model="gemini-1.5-flash")
-        elif ai_provider.lower() == "openai":
-            llm = ChatOpenAI(model="gpt-4o")
-        else:
-            # Use our standard get_llm function for consistency
-            llm = get_llm(ai_provider)
-
-        # Use our configure_browser_profile utility
-        test_browser_config = {"headful": False}  # Force headless for testing
-        browserSession, browser_info = configure_browser_profile(test_browser_config)
-        logger.info(f"Test browser configuration: {browser_info}")
-
-        # Use our create_agent_config utility
-        task_instruction = "Navigate to example.com and take a screenshot"
-        sensitive_data = get_sensitive_data()
-        agent_config = create_agent_config(
-            task_instruction, llm, sensitive_data, browserSession
-        )
-
-        agent = Agent(**agent_config)
-
-        # Navigate to test page
-        logger.info("Navigating to example.com for test")
-        await agent.browser_session.navigate_to("https://example.com")
-
-        # Test our capture_screenshot function
-        test_task_id = "screenshot-test"
-        logger.info("Testing screenshot capture with utility function")
-        await capture_screenshot(agent, test_task_id, "test-user", task_storage)
-
-        # Check results using the same logic but simplified
-        test_media_dir = MEDIA_DIR / test_task_id
-        if test_media_dir.exists():
-            screenshots = list(test_media_dir.glob("*.png"))
-            if screenshots:
-                latest_screenshot = max(screenshots, key=lambda x: x.stat().st_mtime)
-                file_size = latest_screenshot.stat().st_size
-
-                return {
-                    "success": True,
-                    "message": "Screenshot test completed using refactored utilities",
-                    "file_size": file_size,
-                    "file_path": str(latest_screenshot),
-                    "url": f"/media/{test_task_id}/{latest_screenshot.name}",
-                    "utilities_used": [
-                        "configure_browser_profile",
-                        "create_agent_config",
-                        "capture_screenshot",
-                    ],
-                }
-            else:
-                return {"error": "No screenshots found after test"}
-        else:
-            return {"error": "Test media directory not created"}
-
-    except Exception as e:
-        logger.exception("Error in screenshot test")
-        return {"error": f"Test failed: {str(e)}"}
-    finally:
-        # Cleanup browser
-        if browser:
-            try:
-                await browser.close()
-            except Exception as e:
-                logger.error(f"Error closing test browser: {str(e)}")

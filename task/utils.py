@@ -2,7 +2,7 @@
 
 import os
 
-from task.constants import MEDIA_DIR, logger
+from task.constants import logger
 
 
 def get_sensitive_data():
@@ -15,9 +15,5 @@ def get_sensitive_data():
 
 
 def prepare_task_environment(task_id: str, _user_id: str):
-    """Prepare task environment and media directory"""
-    # Create task media directory up front
-    task_media_dir = MEDIA_DIR / task_id
-    task_media_dir.mkdir(exist_ok=True, parents=True)
-    logger.info(f"Created media directory for task {task_id}: {task_media_dir}")
-    return task_media_dir
+    """Placeholder for task-specific setup logic"""
+    logger.info(f"Initializing environment for task {task_id}")
