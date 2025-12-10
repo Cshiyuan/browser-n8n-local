@@ -25,6 +25,17 @@ async def lifespan(_app: FastAPI):
     """Handle application startup and shutdown"""
     # Startup
     logger.info("Browser Use Bridge API starting up...")
+
+    # Validate LLM Key Pool configuration
+    from task.llm_pool import _llm_pool_manager
+    logger.info("Validating LLM Key Pool configuration...")
+    for provider, pool in _llm_pool_manager.pools.items():
+        if pool.has_keys():
+            key_count = pool.get_key_count()
+            logger.info(f"✓ {provider.upper()}: {key_count} API Key(s) loaded")
+        else:
+            logger.warning(f"⚠ {provider.upper()}: No API Keys configured")
+
     yield
     # Shutdown
     logger.info("Browser Use Bridge API shutting down...")

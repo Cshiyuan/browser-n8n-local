@@ -9,6 +9,7 @@
 - **API 路由**: `app/routes.py:73-491` - 所有 API 端点定义
 - **任务执行**: `task/executor.py:37-170` - 核心任务编排逻辑
 - **LLM 集成**: `task/llm.py:14-158` - 多提供商 LLM 配置
+- **LLM 负载均衡**: `task/llm_pool.py:1-173` - API Key 轮询池管理
 - **浏览器配置**: `task/browser_config.py:22-117` - 浏览器自动化配置
 - **存储抽象**: `task/storage/base.py` + `task/storage/memory.py` - 任务存储层
 
@@ -33,7 +34,9 @@ curl http://localhost:8000/api/v1/ping
 | `PORT` | 服务端口 | 8000 |
 | `DEFAULT_AI_PROVIDER` | 默认 AI 提供商 | openai |
 | `BROWSER_USE_HEADFUL` | 显示浏览器 UI | false |
-| `OPENAI_API_KEY` | OpenAI API 密钥 | 必需 |
+| `MAX_HISTORY_ITEMS` | Agent 历史记录最大条数 | 10 |
+| `OPENAI_API_KEYS` | OpenAI API 密钥 (多个用逗号分隔) | 必需 |
+| `OPENAI_API_KEY` | OpenAI API 密钥 (单个,向后兼容) | 可选 |
 | `CHROME_PATH` | 自定义 Chrome 路径 | 可选 |
 
 ---
@@ -44,7 +47,7 @@ curl http://localhost:8000/api/v1/ping
 
 ### 核心价值主张
 - **本地控制**: 完全本地运行,无云依赖
-- **多 LLM 支持**: 7+ AI 提供商集成
+- **多 LLM 支持**: 7+ AI 提供商集成,支持多 API Key 负载均衡
 - **API 兼容**: 兼容 Browser Use Cloud API 端点
 - **灵活配置**: Headful/Headless、视觉模式、结构化输出
 
@@ -78,17 +81,17 @@ curl http://localhost:8000/api/v1/ping
 ### AI/LLM 集成层
 支持的 AI 提供商 (通过 LangChain):
 
-| 提供商 | 模型类 | 默认模型 | 环境变量 |
-|--------|--------|----------|----------|
-| **OpenAI** | `ChatOpenAI` | gpt-4o | `OPENAI_API_KEY`, `OPENAI_MODEL_ID`, `OPENAI_BASE_URL` (可选) |
-| **Anthropic** | `ChatAnthropic` | claude-3-opus-20240229 | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL_ID` |
-| **Google AI** | `ChatGoogle` | gemini-1.5-pro | `GOOGLE_API_KEY`, `GOOGLE_MODEL_ID` |
-| **MistralAI** | (未启用) | mistral-large-latest | `MISTRAL_API_KEY`, `MISTRAL_MODEL_ID` |
-| **Ollama** | `ChatOllama` | llama3 | `OLLAMA_MODEL_ID`, `OLLAMA_API_BASE` |
-| **Azure OpenAI** | `ChatAzureOpenAI` | gpt-4o | `AZURE_API_KEY`, `AZURE_ENDPOINT`, `AZURE_DEPLOYMENT_NAME`, `AZURE_API_VERSION` |
-| **AWS Bedrock** | `ChatAWSBedrock` | anthropic.claude-3-sonnet-20240229-v1:0 | `BEDROCK_MODEL_ID`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` |
+| 提供商 | 模型类 | 默认模型 | 环境变量 | 负载均衡 |
+|--------|--------|----------|----------|----------|
+| **OpenAI** | `ChatOpenAI` | gpt-4o | `OPENAI_API_KEYS` (多个) 或 `OPENAI_API_KEY` (单个), `OPENAI_MODEL_ID`, `OPENAI_BASE_URL` (可选) | ✅ |
+| **Anthropic** | `ChatAnthropic` | claude-3-opus-20240229 | `ANTHROPIC_API_KEYS` (多个) 或 `ANTHROPIC_API_KEY` (单个), `ANTHROPIC_MODEL_ID` | ✅ |
+| **Google AI** | `ChatGoogle` | gemini-1.5-pro | `GOOGLE_API_KEYS` (多个) 或 `GOOGLE_API_KEY` (单个), `GOOGLE_MODEL_ID` | ✅ |
+| **MistralAI** | (未启用) | mistral-large-latest | `MISTRAL_API_KEY`, `MISTRAL_MODEL_ID` | ❌ |
+| **Ollama** | `ChatOllama` | llama3 | `OLLAMA_MODEL_ID`, `OLLAMA_API_BASE` | ❌ |
+| **Azure OpenAI** | `ChatAzureOpenAI` | gpt-4o | `AZURE_API_KEY`, `AZURE_ENDPOINT`, `AZURE_DEPLOYMENT_NAME`, `AZURE_API_VERSION` | ❌ |
+| **AWS Bedrock** | `ChatAWSBedrock` | anthropic.claude-3-sonnet-20240229-v1:0 | `BEDROCK_MODEL_ID`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` | ❌ |
 
-**LLM 选择机制**: `task/llm.py:14-158` - `get_llm(ai_provider)` 工厂函数
+**LLM 选择机制**: `task/llm.py:14-158` - `get_llm(ai_provider)` 工厂函数,集成 API Key 轮询池 (`task/llm_pool.py`) 实现负载均衡
 
 ### 依赖包
 - **langchain** (`>=0.3.0`) - LLM 框架核心
@@ -115,6 +118,7 @@ browser-n8n-local/
 │   ├── executor.py        # 任务编排和执行 (170 行)
 │   ├── agent.py           # Agent 配置构建
 │   ├── llm.py             # LLM 提供商集成 (158 行)
+│   ├── llm_pool.py        # LLM API Key 轮询池管理 (173 行)
 │   ├── browser_config.py  # 浏览器配置管理 (117 行)
 │   ├── schema_utils.py    # JSON Schema → Pydantic 动态转换 (209 行)
 │   ├── utils.py           # 工具函数 (敏感数据提取)
@@ -303,6 +307,7 @@ CREATED → RUNNING → FINISHED
            ▼
 ┌─────────────────────────────┐
 │ 4. 初始化 LLM 提供商         │  get_llm(ai_provider)
+│    - 自动轮询 API Key        │  get_pooled_api_key(provider)
 └──────────┬──────────────────┘
            │
            ▼
@@ -364,6 +369,31 @@ finally:
 1. **异常捕获**: 记录错误并更新任务状态为 FAILED
 2. **日志记录**: `logger.exception()` 包含完整堆栈跟踪
 3. **资源清理**: `finally` 确保浏览器关闭,防止进程泄漏
+
+### 资源清理流程 (`task/executor.py:61-87`)
+任务完成后的清理顺序确保防止内存泄漏:
+
+```python
+async def cleanup_task(browser, task_id, user_id, task_storage):
+    # 1. 停止 Agent (设置停止标志)
+    agent = task_storage.get_task_agent(task_id, user_id)
+    if agent:
+        agent.stop()  # 仅设置 stopped=True
+
+    # 2. 关闭 BrowserSession (清理 EventBus)
+    if browser is not None:
+        await browser.stop()
+
+    # 3. 移除 Agent 引用 (允许垃圾回收)
+    task_storage.remove_task_agent(task_id, user_id)
+```
+
+**关键设计**:
+- `Agent.stop()` 不清理 EventBus,仅设置停止标志
+- `BrowserSession.stop()` 负责清理 BrowserSession 的 EventBus
+- Agent 的 EventBus 在对象被垃圾回收时自动清理
+- 从 storage 移除 Agent 引用是触发垃圾回收的关键步骤
+- Agent 历史记录通过 `max_history_items` 参数限制内存使用
 
 ---
 
@@ -461,7 +491,41 @@ def get_sensitive_data():
 - 环境变量以 `X_` 前缀命名 (例如: `X_PASSWORD`, `X_API_KEY`)
 - 这些数据在任务执行时对 Agent 可用,但不会记录在日志中
 
-### 4. 浏览器配置高级选项 (`task/browser_config.py`)
+### 4. LLM API Key 负载均衡 (`task/llm_pool.py`)
+**用途**: 为同一 AI 提供商配置多个 API Key,使用 Round-Robin 策略自动轮询
+
+**支持的提供商**:
+- OpenAI (`OPENAI_API_KEYS`)
+- Anthropic (`ANTHROPIC_API_KEYS`)
+- Google AI (`GOOGLE_API_KEYS`)
+
+**配置格式**:
+```bash
+# 多 Key 配置 (推荐) - 逗号分隔
+OPENAI_API_KEYS=key1,key2,key3,key4
+ANTHROPIC_API_KEYS=key1,key2
+GOOGLE_API_KEYS=key-agent1,key-agent2,key-agent3
+
+# 单 Key 配置 (向后兼容)
+AZURE_API_KEY=single-key
+```
+
+**工作原理**:
+- `ProviderKeyPool`: 管理单个提供商的 Key 列表,维护轮询索引
+- `LLMPoolManager`: 全局管理器,为所有提供商创建 Key Pool
+- `get_pooled_api_key(provider)`: 获取下一个可用 Key
+- 每次调用 `get_llm()` 时自动轮询到下一个 Key
+- asyncio 单线程环境下无需锁机制
+
+**启动验证**:
+服务启动时自动记录每个提供商加载的 Key 数量:
+```
+✓ OPENAI: 4 API Key(s) loaded
+✓ ANTHROPIC: 2 API Key(s) loaded
+⚠ AZURE: No API Keys configured
+```
+
+### 5. 浏览器配置高级选项 (`task/browser_config.py`)
 
 **核心配置** (`browser_config.py:22-117`):
 ```python
@@ -624,6 +688,7 @@ def get_llm(ai_provider: str):
 - `LOG_LEVEL`: 日志级别 (默认 INFO)
 - `BROWSER_USE_HEADFUL`: 是否显示浏览器 UI (默认 false)
 - `DEFAULT_AI_PROVIDER`: 默认 AI 提供商 (默认 openai)
+- `MAX_HISTORY_ITEMS`: Agent 历史记录最大条数 (默认 10) - 控制内存使用
 
 ### AI 提供商配置
 每个 AI 提供商需要相应的 API key 和 model ID (详见 `.env-example`):
@@ -701,6 +766,8 @@ patchright install chromium
 
 ### API Key 问题
 - 验证 `.env` 文件中的 API keys 是否正确设置
+- 多 Key 配置格式: `PROVIDER_API_KEYS=key1,key2,key3` (逗号分隔,无空格)
+- 单 Key 配置格式: `PROVIDER_API_KEY=key` (向后兼容)
 - 检查是否有多余空格或引号
 
 ### 端口冲突
@@ -718,6 +785,7 @@ PORT=8001
 - **[app/routes.py](/app/routes.py)** - API 端点实现
 - **[task/executor.py](/task/executor.py)** - 任务执行核心逻辑
 - **[task/llm.py](/task/llm.py)** - LLM 提供商集成
+- **[task/llm_pool.py](/task/llm_pool.py)** - LLM API Key 轮询池管理
 
 ---
 

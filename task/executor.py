@@ -5,7 +5,7 @@ from typing import Optional
 from browser_use import Agent, BrowserSession
 from browser_use.agent.views import AgentHistoryList
 
-from task.constants import TaskStatus, logger
+from task.constants import TaskStatus, logger, MAX_HISTORY_ITEMS
 from task.llm import get_llm
 from task.browser_config import configure_browser_profile
 from task.agent import create_agent_config
@@ -60,12 +60,31 @@ async def collect_browser_cookies(agent, task_id: str, user_id: str, task_storag
 
 async def cleanup_task(browser: Optional[BrowserSession], task_id: str, user_id: str, task_storage):
     """Clean up task resources after execution"""
+    # 1. Stop agent (sets stop flag)
+    try:
+        agent = task_storage.get_task_agent(task_id, user_id)
+        if agent:
+            logger.info(f"Stopping agent for task {task_id}")
+            try:
+                agent.stop()  # No parameters - just sets stopped flag
+            except Exception as e:
+                logger.warning(f"Error stopping agent for task {task_id}: {e}")
+    except Exception as e:
+        logger.warning(f"Error during agent stop for task {task_id}: {e}")
+
+    # 2. Close browser (this cleans up BrowserSession EventBus)
     if browser is not None:
         logger.info(f"Closing browser for task {task_id}")
         try:
             await browser.stop()
         except Exception as e:
             logger.error(f"Error closing browser for task {task_id}: {str(e)}")
+
+    # 3. Remove agent reference from storage (enables garbage collection)
+    try:
+        task_storage.remove_task_agent(task_id, user_id)
+    except Exception as e:
+        logger.warning(f"Error removing agent reference for task {task_id}: {e}")
 
 
 async def execute_task(
@@ -119,7 +138,7 @@ async def execute_task(
         # Create agent with all configuration
         sensitive_data = get_sensitive_data()
         agent_config = create_agent_config(
-            instruction, llm, sensitive_data, browser, use_vision, output_model
+            instruction, llm, sensitive_data, browser, use_vision, output_model, MAX_HISTORY_ITEMS
         )
         logger.info(f"Agent config keys: {list(agent_config.keys())}")
 
@@ -165,11 +184,13 @@ async def cleanup_all_tasks(task_storage):
                     agent = task_storage.get_task_agent(task_id)
                     if agent:
                         try:
-                            agent.stop()
+                            agent.stop()  # No parameters - just sets stopped flag
                         except Exception as e:
                             logger.warning(
                                 f"Error stopping agent for task {task_id}: {e}"
                             )
+                        # Remove agent from storage to enable garbage collection
+                        task_storage.remove_task_agent(task_id)
 
                     # Update task status
                     task_storage.update_task_status(task_id, TaskStatus.STOPPED)

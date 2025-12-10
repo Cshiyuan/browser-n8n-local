@@ -1,7 +1,15 @@
 """Constants and enums for task management"""
 
 import logging
+import os
 from enum import Enum
+
+
+# Agent configuration constants
+MAX_HISTORY_ITEMS = int(os.environ.get("MAX_HISTORY_ITEMS", "10"))
+
+# LLM Pool configuration
+SUPPORTED_POOLED_PROVIDERS = ["openai", "anthropic", "google"]
 
 
 # Define task status enum

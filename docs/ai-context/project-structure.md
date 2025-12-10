@@ -81,6 +81,7 @@ browser-n8n-local/
 │   ├── executor.py                 # 任务编排和执行 (170 行)
 │   ├── agent.py                    # Agent 配置构建
 │   ├── llm.py                      # LLM 提供商集成 (158 行)
+│   ├── llm_pool.py                 # LLM API Key 轮询池管理 (173 行)
 │   ├── browser_config.py           # 浏览器配置管理 (117 行)
 │   ├── schema_utils.py             # JSON Schema → Pydantic 转换 (209 行)
 │   ├── utils.py                    # 工具函数 (敏感数据提取)
@@ -146,6 +147,7 @@ browser-n8n-local/
 - 创建 FastAPI 应用实例
 - 配置 CORS 中间件
 - 管理生命周期 (启动/关闭)
+- 启动验证: LLM Key Pool 配置检查和日志记录
 - 优雅关闭: 清理所有运行中的任务
 
 **`app/routes.py`** (API 端点,491 行)
@@ -177,8 +179,9 @@ browser-n8n-local/
 
 #### 关键文件
 
-**`task/executor.py`** (任务编排,170 行)
+**`task/executor.py`** (任务编排,200+ 行)
 - `execute_task()`: 主执行函数 (10步流程)
+- `cleanup_task()`: 资源清理 (Agent停止 → Browser关闭 → 引用移除)
 - `cleanup_all_tasks()`: 优雅关闭时清理所有任务
 - 错误处理: try/except/finally 三层防护
 - 异步执行: asyncio.create_task()
@@ -187,11 +190,20 @@ browser-n8n-local/
 - `create_agent_config()`: 构建 Browser Use Agent 配置
 - 支持 Vision 模式
 - 支持结构化输出 (output_model_schema)
+- 配置 `max_history_items` 限制历史记录内存使用
 
 **`task/llm.py`** (LLM 集成,158 行)
 - `get_llm(ai_provider)`: 工厂函数,动态选择 LLM
 - 支持 7+ AI 提供商
+- 集成 API Key 轮询池实现负载均衡
 - 环境变量驱动配置
+
+**`task/llm_pool.py`** (API Key 池管理,173 行)
+- `ProviderKeyPool`: 单个提供商的 Key 轮询池
+- `LLMPoolManager`: 全局 Key Pool 管理器
+- `get_pooled_api_key(provider)`: 获取轮询的 API Key
+- Round-Robin 负载均衡策略
+- 支持向后兼容 (单 Key 和多 Key 配置)
 
 **`task/browser_config.py`** (浏览器配置,117 行)
 - `configure_browser_profile()`: 生成 BrowserSession 配置
@@ -211,6 +223,8 @@ browser-n8n-local/
 **`task/constants.py`** (常量和枚举)
 - `TaskStatus`: 7种任务状态枚举
 - `DEFAULT_USER_ID`: 默认用户 ID
+- `MAX_HISTORY_ITEMS`: Agent 历史记录最大条数配置
+- `SUPPORTED_POOLED_PROVIDERS`: 支持 Key 轮询的 AI 提供商列表
 - 日志配置: logging.basicConfig()
 
 ---
@@ -224,13 +238,14 @@ browser-n8n-local/
 
 **`task/storage/base.py`** (抽象基类)
 - `TaskStorage`: ABC 定义存储接口
-- 方法: create_task, update_task_status, get_task, 等
+- 方法: create_task, update_task_status, get_task, remove_task_agent, 等
 - 多用户支持: 所有方法接受 `user_id` 参数
 
 **`task/storage/memory.py`** (内存实现)
 - `InMemoryTaskStorage`: 内存存储实现
 - 数据结构: `Dict[user_id, Dict[task_id, task_data]]`
 - Agent 实例管理: 不可序列化,仅内存存储
+- `remove_task_agent()`: 移除 Agent 引用以触发垃圾回收
 
 **`task/storage/__init__.py`** (工厂函数)
 - `get_task_storage(storage_type)`: 存储工厂
@@ -296,7 +311,7 @@ execute_task()
     ↓
 [1] prepare_task_environment() - 更新状态为 RUNNING
     ↓
-[2] get_llm(ai_provider) - 初始化 LLM
+[2] get_llm(ai_provider) - 初始化 LLM (自动轮询 API Key)
     ↓
 [3] configure_browser_profile() - 配置浏览器
     ↓
@@ -321,15 +336,17 @@ execute_task()
 
 ### 必需环境变量
 - **至少一个 LLM 提供商的 API Key**
-  - `OPENAI_API_KEY` + `OPENAI_MODEL_ID`
-  - 或 `ANTHROPIC_API_KEY` + `ANTHROPIC_MODEL_ID`
-  - 或 `GOOGLE_API_KEY` + `GOOGLE_MODEL_ID`
+  - 多 Key 配置 (推荐): `OPENAI_API_KEYS=key1,key2,key3` (逗号分隔)
+  - 单 Key 配置 (兼容): `OPENAI_API_KEY=single_key`
+  - 同样适用于 `ANTHROPIC_API_KEYS`/`GOOGLE_API_KEYS` 等
+  - 需配置对应的 MODEL_ID (如 `OPENAI_MODEL_ID`)
 
 ### 可选环境变量
 - `PORT`: 服务端口 (默认 8000)
 - `LOG_LEVEL`: 日志级别 (默认 INFO)
 - `DEFAULT_AI_PROVIDER`: 默认 AI 提供商 (默认 openai)
 - `BROWSER_USE_HEADFUL`: 显示浏览器 UI (默认 false)
+- `MAX_HISTORY_ITEMS`: Agent 历史记录最大条数 (默认 10)
 - `CHROME_PATH`: 自定义 Chrome 路径
 - `CHROME_USER_DATA`: Chrome 用户数据目录
 

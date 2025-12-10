@@ -67,6 +67,11 @@ class TaskStorage(ABC):
         pass
 
     @abstractmethod
+    def remove_task_agent(self, task_id: str, user_id: str = DEFAULT_USER_ID) -> None:
+        """Remove the agent instance from a task to free memory"""
+        pass
+
+    @abstractmethod
     def set_task_output(self, task_id: str, output: str, user_id: str = DEFAULT_USER_ID) -> None:
         """Set the output result of a task"""
         pass

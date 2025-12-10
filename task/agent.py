@@ -12,6 +12,7 @@ def create_agent_config(
     browserSession: Optional[BrowserSession] = None,
     use_vision: Optional[bool | Literal['auto']] = None,
     output_model: Optional[type] = None,
+    max_history_items: int = 10,
 ):
     """Create agent configuration dictionary
 
@@ -22,6 +23,7 @@ def create_agent_config(
         browserSession: Optional BrowserSession instance
         use_vision: Whether to use vision capabilities ('auto', True, or False)
         output_model: Optional Pydantic model class for structured output
+        max_history_items: Maximum number of history messages to keep (default: 10)
 
     Returns:
         Dictionary of agent configuration parameters
@@ -30,6 +32,7 @@ def create_agent_config(
         "task": instruction,
         "llm": llm,
         "sensitive_data": sensitive_data,
+        "max_history_items": max_history_items,
     }
 
     if browserSession is not None:

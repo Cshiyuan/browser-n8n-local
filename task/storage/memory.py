@@ -143,8 +143,18 @@ class InMemoryTaskStorage(TaskStorage):
         """Set the agent instance for a task"""
         if not self.task_exists(task_id, user_id):
             raise KeyError(f"Task {task_id} not found for user {user_id}")
-        
+
         self._tasks[user_id][task_id]["agent"] = agent
+
+    def remove_task_agent(self, task_id: str, user_id: str = DEFAULT_USER_ID) -> None:
+        """Remove the agent instance from a task to free memory"""
+        if not self.task_exists(task_id, user_id):
+            logger.warning(f"Task {task_id} not found for user {user_id} when removing agent")
+            return
+
+        if "agent" in self._tasks[user_id][task_id]:
+            del self._tasks[user_id][task_id]["agent"]
+            logger.info(f"Removed agent for task {task_id}")
 
     def set_task_output(self, task_id: str, output: str, user_id: str = DEFAULT_USER_ID) -> None:
         """Set the output result of a task"""
