@@ -50,6 +50,7 @@ curl http://localhost:8000/api/v1/ping
 - **多 LLM 支持**: 7+ AI 提供商集成,支持多 API Key 负载均衡
 - **API 兼容**: 兼容 Browser Use Cloud API 端点
 - **灵活配置**: Headful/Headless、视觉模式、结构化输出
+- **Webhook 回调**: 异步任务完成通知,与 n8n 等工作流工具无缝集成
 
 ---
 
@@ -99,6 +100,7 @@ curl http://localhost:8000/api/v1/ping
 - **langchain-anthropic** (`>=0.3.0`) - Anthropic Claude 集成
 - **langchain-google-genai** (`>=2.0.0`) - Google Gemini 集成
 - **python-dotenv** (`>=1.0.0`) - 环境变量管理
+- **httpx** (`>=0.24.0`) - 异步HTTP客户端,用于Webhook回调
 
 ---
 
@@ -395,6 +397,20 @@ async def cleanup_task(browser, task_id, user_id, task_storage):
 - 从 storage 移除 Agent 引用是触发垃圾回收的关键步骤
 - Agent 历史记录通过 `max_history_items` 参数限制内存使用
 
+**EventBus 内存管理** (`executor.py:149-160`, `browser_config.py:101-113`):
+- EventBus 默认 `max_history_size=50`，会保留 50 个事件历史记录
+- 每个事件可能包含大量数据（截图、DOM 信息等），导致内存占用快速增长
+- 在 Agent 和 BrowserSession 创建后，自动设置 `eventbus.max_history_size = MAX_HISTORY_ITEMS`
+- **关键实现细节**：
+  - **Agent**: 使用 `agent.eventbus` (无下划线) - `executor.py:152-160`
+  - **BrowserSession**: 使用 `browser.event_bus` (有下划线) - `browser_config.py:105-113`
+  - 属性名不一致是 browser-use 库的设计决定
+- 这与 Agent 的 `max_history_items` 不同：
+  - `max_history_items`: 控制发送给 LLM 的消息数量（不释放内存）
+  - `eventbus.max_history_size`: 控制 EventBus 实际保存的事件数量（真正影响内存）
+- 通过 `MAX_HISTORY_ITEMS` 环境变量统一控制两者，确保内存使用可控
+- 日志会显示设置前后的值变化：`EventBus max_history_size: 50 -> 20`
+
 ---
 
 ## API 端点详细说明
@@ -426,6 +442,8 @@ class TaskRequest(BaseModel):
     use_vision: Optional[str] = "auto"     # Vision 模式: "auto"/"true"/"false"
     output_model_schema: Optional[str] = None  # JSON Schema 字符串
     browser_config: Optional[Dict] = {}    # 自定义浏览器配置
+    webhook_url: Optional[str] = None      # Webhook回调URL (任务完成/失败时通知)
+    webhook_events: Optional[list] = None  # Webhook事件类型列表 (默认: ["task.completed", "task.failed"])
 ```
 
 ---
@@ -563,6 +581,89 @@ window_config = task_browser_config.get("window_config")
 if window_config:
     browser_config_args.update(window_config)
 ```
+
+### 6. Webhook 回调功能 (`task/utils.py`, `task/executor.py`)
+
+**用途**: 任务完成或失败时自动通知外部系统(如n8n),实现真正的异步工作流
+
+**核心特性**:
+- ✅ 自动回调: 任务状态变化时主动通知
+- ✅ 重试机制: 3次重试,指数退避(1s, 2s, 4s)
+- ✅ 事件过滤: 可选择监听的事件类型
+- ✅ 错误隔离: Webhook失败不影响任务本身
+
+**配置方式**:
+```python
+# POST /api/v1/run-task
+{
+  "task": "浏览器任务指令",
+  "ai_provider": "openai",
+  "webhook_url": "https://n8n.example.com/webhook-waiting/exec-abc123",  # Webhook回调URL
+  "webhook_events": ["task.completed", "task.failed"]  # 监听的事件类型(可选,默认两者都监听)
+}
+```
+
+**支持的事件类型**:
+- `task.completed` - 任务成功完成
+- `task.failed` - 任务执行失败
+
+**Webhook Payload格式**:
+```json
+{
+  "event": "task.completed",  // 或 "task.failed"
+  "task_id": "task_xyz789",
+  "status": "completed",  // 或 "failed"
+  "timestamp": "2025-12-11T10:32:15.123Z",
+
+  // 成功时包含:
+  "result": {
+    "final_result": "任务执行结果"
+  },
+
+  // 失败时包含:
+  "error": "错误信息描述"
+}
+```
+
+**实现细节** (`task/utils.py:trigger_webhook()`):
+- 使用 `httpx.AsyncClient` 发送异步POST请求
+- 超时设置: 10秒
+- 重试策略: 最多3次,指数退避
+- 日志记录: 成功/失败/超时都有详细日志
+- 请求头: `Content-Type: application/json`, `User-Agent: Browser-Use-Webhook/1.0`
+
+**触发时机** (`task/executor.py`):
+1. **任务成功**: `mark_task_finished()` → `collect_browser_cookies()` → `trigger_webhook()`
+2. **任务失败**: `mark_task_finished()` → `trigger_webhook()` (在exception handler中)
+
+**测试工具**:
+```bash
+# 使用提供的测试脚本
+python test/test_webhook.py
+
+# 该脚本会:
+# 1. 启动Mock Webhook服务器(端口5555)
+# 2. 发送带webhook_url的测试任务
+# 3. 等待任务完成并验证webhook回调
+# 4. 显示完整的webhook payload
+```
+
+**依赖要求**:
+```bash
+# 确保httpx已安装
+pip install httpx>=0.24.0
+```
+
+**n8n集成示例**:
+```
+n8n工作流: Manual Trigger → Run Task (webhook_url配置) → Wait (On Webhook Call) → 处理结果
+```
+
+**安全建议**:
+- ⚠️ Webhook URL应该是可信的外部端点
+- ⚠️ 建议使用HTTPS保护数据传输
+- ⚠️ 生产环境可考虑添加HMAC签名验证
+- ⚠️ 避免将内网地址作为webhook_url(可添加验证逻辑)
 
 ---
 

@@ -98,4 +98,18 @@ def configure_browser_profile(
     browser = BrowserSession(browser_profile=browser_config)
     browser_info["browser_config_args"] = browser_config_args
 
+    # Configure BrowserSession EventBus max_history_size to reduce memory usage
+    # Import MAX_HISTORY_ITEMS to maintain consistency with Agent configuration
+    # Note: BrowserSession uses 'event_bus' (with underscore), not 'eventbus'
+    from task.constants import MAX_HISTORY_ITEMS
+    if hasattr(browser, 'event_bus') and browser.event_bus:
+        try:
+            old_size = browser.event_bus.max_history_size
+            browser.event_bus.max_history_size = MAX_HISTORY_ITEMS
+            logger.info(f"BrowserSession EventBus max_history_size: {old_size} -> {MAX_HISTORY_ITEMS}")
+        except Exception as e:
+            logger.warning(f"Failed to set BrowserSession EventBus max_history_size: {e}")
+    else:
+        logger.warning("BrowserSession has no event_bus attribute")
+
     return browser, browser_info

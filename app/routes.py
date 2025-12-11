@@ -67,6 +67,9 @@ async def run_task(request: TaskRequest, user_id: str = Depends(get_user_id)):
         "use_vision": request.use_vision,
         "output_model_schema": request.output_model_schema,
         "live_url": live_url,
+        # Webhook configuration
+        "webhook_url": request.webhook_url,
+        "webhook_events": request.webhook_events or ["task.completed", "task.failed"],
     }
 
     # Store the task in storage

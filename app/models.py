@@ -18,6 +18,8 @@ class TaskRequest(BaseModel):
     )
     use_vision: Optional[str] = "auto"  # Vision capability: 'auto', 'true', or 'false'
     output_model_schema: Optional[str] = None  # JSON schema string for structured output
+    webhook_url: Optional[str] = None  # Webhook URL to call when task completes/fails
+    webhook_events: Optional[list] = None  # Events to trigger webhook: ['task.completed', 'task.failed']
 
 
 class TaskResponse(BaseModel):

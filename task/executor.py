@@ -9,7 +9,7 @@ from task.constants import TaskStatus, logger, MAX_HISTORY_ITEMS
 from task.llm import get_llm
 from task.browser_config import configure_browser_profile
 from task.agent import create_agent_config
-from task.utils import get_sensitive_data, prepare_task_environment
+from task.utils import get_sensitive_data, prepare_task_environment, trigger_webhook
 from task.storage.base import DEFAULT_USER_ID
 from task.schema_utils import parse_output_model_schema
 
@@ -44,7 +44,17 @@ async def collect_browser_cookies(agent, task_id: str, user_id: str, task_storag
             )
 
         if browser_session and hasattr(browser_session, "get_cookies"):
-            cookies = await browser_session.get_cookies()
+            # Check if browser connection is still alive before attempting cookie collection
+            try:
+                # Verify browser context is available and not closed
+                if hasattr(browser_session, 'context') and browser_session.context:
+                    cookies = await browser_session.get_cookies()
+                    logger.info(f"Successfully collected {len(cookies)} cookies for task {task_id}")
+                else:
+                    logger.warning(f"Browser context already closed for task {task_id}, skipping cookie collection")
+            except Exception as conn_err:
+                # Browser connection already closed - this is expected after agent.run() completes
+                logger.info(f"Browser connection closed for task {task_id}, skipping cookie collection: {str(conn_err)}")
         else:
             logger.warning(f"No method to collect cookies for task {task_id}")
 
@@ -137,12 +147,28 @@ async def execute_task(
 
         # Create agent with all configuration
         sensitive_data = get_sensitive_data()
+        logger.info(f"Task {task_id}: MAX_HISTORY_ITEMS={MAX_HISTORY_ITEMS}")
         agent_config = create_agent_config(
             instruction, llm, sensitive_data, browser, use_vision, output_model, MAX_HISTORY_ITEMS
         )
         logger.info(f"Agent config keys: {list(agent_config.keys())}")
+        logger.info(f"Agent config max_history_items: {agent_config.get('max_history_items')}")
 
         agent = Agent(**agent_config)
+
+        # Configure EventBus max_history_size to reduce memory usage
+        # EventBus defaults to max_history_size=50, which causes high memory consumption
+        # Agent uses 'eventbus' attribute (no underscore)
+        if hasattr(agent, 'eventbus') and agent.eventbus:
+            try:
+                old_size = agent.eventbus.max_history_size
+                agent.eventbus.max_history_size = MAX_HISTORY_ITEMS
+                logger.info(f"Task {task_id}: Agent EventBus max_history_size: {old_size} -> {MAX_HISTORY_ITEMS}")
+            except Exception as e:
+                logger.warning(f"Task {task_id}: Failed to set Agent EventBus max_history_size: {e}")
+        else:
+            logger.warning(f"Task {task_id}: Agent has no eventbus attribute")
+
         task_storage.set_task_agent(task_id, agent, user_id)
 
         # Execute task without automated screenshots
@@ -152,12 +178,41 @@ async def execute_task(
         task_storage.mark_task_finished(task_id, user_id, TaskStatus.FINISHED)
         await process_task_result(result, task_id, user_id, task_storage)
         await collect_browser_cookies(agent, task_id, user_id, task_storage)
+        
+        # Trigger webhook on successful completion
+        webhook_url = task.get("webhook_url") if task else None
+        webhook_events = task.get("webhook_events", []) if task else []
+        if webhook_url and "task.completed" in webhook_events:
+            output = task_storage.get_task(task_id, user_id).get("output") if task_storage.get_task(task_id, user_id) else None
+            await trigger_webhook(
+                webhook_url=webhook_url,
+                task_id=task_id,
+                status="completed",
+                event_type="task.completed",
+                result=output
+            )
 
     except Exception as e:
         logger.exception(f"Error executing task {task_id}")
         task_storage.update_task_status(task_id, TaskStatus.FAILED, user_id)
         task_storage.set_task_error(task_id, str(e), user_id)
         task_storage.mark_task_finished(task_id, user_id, TaskStatus.FAILED)
+        
+        # Trigger webhook on failure
+        try:
+            task = task_storage.get_task(task_id, user_id)
+            webhook_url = task.get("webhook_url") if task else None
+            webhook_events = task.get("webhook_events", []) if task else []
+            if webhook_url and "task.failed" in webhook_events:
+                await trigger_webhook(
+                    webhook_url=webhook_url,
+                    task_id=task_id,
+                    status="failed",
+                    event_type="task.failed",
+                    error=str(e)
+                )
+        except Exception as webhook_error:
+            logger.error(f"Failed to trigger webhook on task failure: {webhook_error}")
     finally:
         await cleanup_task(browser, task_id, user_id, task_storage)
 
